@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+  <!-- 纯净黄色箭头，无 Gaussian blur 光晕（之前的发光会溢出玻璃边缘）-->
+  <path d="M3 2 L18 11 L11 12 L13 20 L9 21 L7 13 L2 17 Z"
+        fill="#F0FE2D"
+        stroke="#0D0D0D"
+        stroke-width="1.2"
+        stroke-linejoin="round"
+        stroke-linecap="round"/>
+</svg>

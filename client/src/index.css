@@ -1,3 +1,45 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    /* WebGL 液态玻璃层接管 bg（dot-grid + 三色 glow + 玻璃形状）。
+       body 仅做 fallback 底色，避免 GL 初始化前的闪白。 */
+    @apply bg-canvas font-sans text-white/90 antialiased;
+    /* 全站黄色 Paul 风格光标（参考设计图）。SVG 32×32，热点 (8,6) 在箭头尖端 */
+    cursor: url("/cursor.svg") 2 2, auto;
+  }
+
+  /* 链接 / 按钮上也保持自定义光标 */
+  a,
+  button,
+  [role="button"] {
+    cursor: url("/cursor.svg") 2 2, pointer;
+  }
+
+  /* 文字输入框保持系统光标，避免影响选词 */
+  input,
+  textarea {
+    cursor: text;
+  }
+
+  /* 全站可点击元素的签名微交互：按下缩 0.97（DESIGN.md motion.press-scale） */
+  button {
+    @apply transition-transform duration-150;
+  }
+  button:active {
+    transform: scale(0.97);
+  }
+
+  /* 数字默认 tabular，遥测块对齐用 */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.02em;
+  }
+}

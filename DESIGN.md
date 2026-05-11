@@ -549,3 +549,205 @@ export default {
 - 移动端没有正式设计，按"只读检视"实现即可。
 - 节点市场 / 模型市场 / 社区流（Make public 的另一面）UI 未给出，需要先做产品决策再补设计。
 - 评论 / 注释 UI 未给出。建议沿用协作者名牌的胶囊形态扩展。
+
+---
+
+# v0.2 增补 —— 嵌套式液态玻璃卡片
+
+> 本节是对原 v0.1 alpha 的补丁，确立"父级液态玻璃 + 内层灰色矩形 + **圆角必须父子一致**"作为节点卡片的标准结构。原 v0.1 中泛泛的"半透明深玻璃节点"由这套更具体的规则取代。
+
+## 1. 关键原则
+
+1. **真液态玻璃只用于父级容器**，不用于内层卡片。
+2. **液态玻璃用 WebGL2 着色器实现**，不要用 CSS `backdrop-filter` 假装——CSS 永远做不出折射 / 色散 / 菲涅尔。
+3. **内层卡片是实心灰矩形**，无渐变、无浮雕、无内顶高光。
+4. **父子圆角必须完全一致**（同一像素值）——这是这套设计的视觉签名，不容妥协。
+
+## 2. 父级：液态玻璃容器（`liquid-glass-parent`）
+
+由 WebGL2 多通道着色器渲染（移植自 `liquid-glass-studio`：bgPass → vBlurPass → hBlurPass → mainPass）。父级是一个透明的 DOM 定位壳；视觉上的"玻璃卡"完全由全屏 WebGL canvas 在它的位置渲染。
+
+### 2.1 着色器参数（已落地为 image2 默认值）
+
+```ts
+{
+  // 折射
+  refThickness: 20,
+  refFactor: 1.4,            // 折射率
+  refDispersion: 7,          // 色散（红/绿/蓝边缘错位强度）
+
+  // 菲涅尔（沿整个边缘的均匀白边）
+  refFresnelRange: 30,
+  refFresnelHardness: 0.20,
+  refFresnelFactor: 0.20,
+
+  // 斜向高光 —— 关闭！避免顶部出现"自发光边缘"
+  glareFactor: 0,            // ← 设为 0
+  glareRange: 30,            // （保留但不生效）
+  glareHardness: 0.20,
+  glareConvergence: 0.50,
+  glareOppositeFactor: 0.80,
+  glareAngle: -45,           // -π/4，未来如需开启的默认
+
+  // 背景模糊
+  blurRadius: 1,
+  blurEdge: true,
+
+  // 形状
+  shapeRoundness: 2.5,       // 超椭圆指数 —— 接近标准圆弧，与内层 CSS 圆角形状一致
+  shapeRadius: 32,           // 默认圆角，**所有内层 CSS 卡必须用同一值**
+
+  // 下方软投影
+  shadowExpand: 25,
+  shadowFactor: 0.15,
+  shadowPosition: [0, -10],
+
+  // 染色
+  tint: [1, 1, 1, 0],        // alpha=0，无染色（让背景原色透过）
+}
+```
+
+### 2.2 关键决策记录
+
+- **`glareFactor: 0`** —— 默认必须关闭。开启会在顶部左/右沿打出强斜光，破坏"嵌套灰卡"的纯净感。如某天确需做"产品截图样式"开启，必须改全局默认。
+- **`shapeRoundness: 2.5`**（不是 5）—— 原 liquid-glass-studio 默认 5（明显超椭圆），与内层 CSS `rounded-[Npx]`（标准圆弧）形状不一致。降到 2.5 后曲线接近圆弧，父子边角拟合度大幅提升。
+- **`shapeRadius: 32`** —— 我们的默认。不同节点可改，但必须**同步**改内层卡。
+
+### 2.3 圆角统一约束
+
+父级液态玻璃形状的 `shapeRadius` 与所有直接子级内层卡的 CSS `rounded-[Npx]` **必须使用同一像素值**。
+
+代码中应通过同一个常量驱动，避免漂移：
+
+```tsx
+const CARD_RADIUS = 32;
+
+// 父级（WebGL）
+<LiquidGlass shape={{ ...rest, radius: CARD_RADIUS }} />
+
+// 子级（DOM）
+<div style={{ borderRadius: CARD_RADIUS }} className="bg-[#1e1e22] border border-white/[0.04]" />
+```
+
+## 3. 内层：灰色矩形（`inner-card`）
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| 背景 | `#1e1e22` | 实色，**不允许渐变** |
+| 边框 | `1px rgba(255,255,255,0.04)` | hairline，仅为定义边界 |
+| 圆角 | **= 父级 `shapeRadius`** | 必须一致 |
+| 内边距 | `p-4`（16px） | 默认；可按内容微调 |
+| 阴影 | `none` | **不允许 `box-shadow: inset 0 1px 0 ...` 这种浮雕假深度** |
+
+### 不允许（铁律）
+
+- ❌ `linear-gradient(180deg, #2a2a2e, #1c1c20)` 上亮下暗的浮雕——破坏"父液态、子矩形"的层次清晰度
+- ❌ `box-shadow: inset 0 1px 0 rgba(255,255,255,X)` 顶部内高光——同上
+- ❌ 内层 `backdrop-filter: blur`——内层是实心矩形，不参与玻璃
+- ❌ 内层圆角 ≠ 父级圆角
+
+### 为什么内层必须扁平
+
+液态玻璃父级已经提供"立体深度感"（折射 + 菲涅尔 + 投影）。如果内层也加渐变/内高光，视觉上就有两层"立体感"互相打架，画面变脏。**让父级负责所有玻璃质感，子级只承担信息密度。**
+
+## 4. 标准组件：嵌套式节点卡
+
+```tsx
+type NestedCardProps = {
+  width: number;
+  height: number;
+  radius: number;          // CARD_RADIUS
+  shapePos: { x: number; y: number };  // 屏幕中心，feed 给 LiquidGlass
+  title: string;
+  children: ReactNode;     // 内层灰卡组成的内容
+};
+```
+
+### 4.1 标题行（外层 padding 内）
+
+- 容器：`p-5`（20px 边距），紧贴外层左上
+- 内容：**空心白圆环**（`h-3 w-3 rounded-full border-[1.5px] border-white/85`） + 节点名 (`text-[14px] font-medium text-white/95`)
+- 与下方第一块内层卡的间距：`pb-4`（16px）
+
+> 空心圆环表示"节点激活状态"，**不要用实心圆**（实心圆是端口的视觉语言，会语义混淆）。
+
+### 4.2 内层卡之间的间距
+
+`mt-3`（12px）—— 比内层 padding 略小，让内层卡群有"成簇"感，与外层 padding（20px）拉开层级。
+
+## 5. 端口位置（嵌套式节点）
+
+- 端口圆点（彩色 + 同色 6px glow）贴在**内层灰卡的右内侧**，不外露刺穿
+- 这是与 v0.1 "端口半在卡内半在卡外"的修订——嵌套式节点不外露端口
+- Wire（节点连线）的 SVG 锚点仍在父级液态玻璃的右边缘 + 端口行的 y 高度
+
+## 6. Wire（节点连线）
+
+- 颜色：统一 **`rgba(255,255,255,0.22)`** 极细灰，**不跟端口色变化**
+- 粗细：`strokeWidth: 1`
+- 不加任何 `drop-shadow` / glow / 颜色发光
+- 这与 v0.1 "连线颜色 = 端口色" 的描述冲突 —— 以本节为准
+
+## 7. 顶部条（修订 v0.1）
+
+参考图修订：顶部条**完全透明**，无 `border-b`，无 `backdrop-blur`，dot grid 透过来。所有顶部按钮直接漂在画布上。
+
+### 7.1 左集群
+- **抽象螺旋 logo**（28×28 SVG 单色描边）
+- 三胶囊 tab：`Workflow`（激活：`bg-white/[0.08]`）/ `Edit` / `Help`（非激活：`bg-white/[0.03]`）
+
+### 7.2 中央项目导航（绝对居中）
+- `‹` 方按钮 + `Black bear ×` 胶囊 + `›` 方按钮
+- 用 `absolute left-1/2 -translate-x-1/2`，不被左右挤压
+
+### 7.3 右集群（运行控制）
+按从左到右：
+1. `⋮` 三点垂直
+2. `▶ Queue ⌄` 胶囊
+3. 上下小步进器（17×24px ×2）
+4. `×` 关闭
+5. 相机图标
+6. `≡` 菜单
+
+### 7.4 通用尺寸
+- 方按钮：36×36，`rounded-[10px]`，背景 `bg-white/[0.04]`，hover `bg-white/[0.08]`
+- 胶囊按钮：`rounded-full`，padding `px-4 py-2` / `px-5 py-2`，text-[13px] medium
+
+## 8. 鼠标光标
+
+全站使用自定义 SVG 光标 `/cursor.svg`：
+
+- 形状：Figma 风格箭头，沿用 `accent-foxo` 黄色填充 + canvas 色 1.2px 描边
+- 滤镜：`<feGaussianBlur stdDeviation="2.5">` 渲染一份同形状半透明黄色作光晕底
+- SVG 画布：32×32，热点 `(8, 6)` 在箭头左上尖端
+- CSS：`cursor: url("/cursor.svg") 8 6, auto;`
+- 例外：`input` / `textarea` 保持系统 `text` 光标，不影响选词
+
+### 协作者名牌（静态）
+
+DOM 上的 `<PaulCursor>` 仍可作为**设计陈列示意**保留（黄三角 + Paul 圆角名牌），与浏览器实际光标视觉一致。
+
+## 9. Generate 行为迁移
+
+v0.1 把 Generate 放在顶部右集群。v0.2 改为：
+
+- **顶部 `▶ Queue ⌄` 即生成入口** —— 节点画布的工作流编辑器里，"运行队列"就是"生成"
+- 不再单独保留电黄 `Generate` 胶囊，但电黄仍保留作为：
+  - 协作者 Paul 的身份色
+  - 节点的 `model` 端口语义色
+  - 鼠标光标主色
+
+## 10. 改动清单（v0.1 → v0.2）
+
+| 项 | v0.1 | v0.2 |
+|---|---|---|
+| 节点卡结构 | 单层"半透明深玻璃" | 父液态玻璃（WebGL）+ 子灰矩形 |
+| 玻璃实现 | `backdrop-filter` CSS | WebGL2 多通道着色器 |
+| 内层卡背景 | 半透明白叠加 | 实心 `#1e1e22` |
+| 内层卡浮雕 | 默认允许 | **禁止**（无渐变/无内高光） |
+| 父子圆角 | 各自定义 | **必须一致**（同一像素值） |
+| 端口位置 | 半在卡内半在卡外 | 仅在内层卡右内侧（不外露） |
+| 连线颜色 | 跟端口色 | 统一 `rgba(255,255,255,0.22)` 灰 |
+| 顶部条 | 半透明 + 底分割线 | 完全透明，无 border |
+| Generate | 顶部右胶囊 | 改为 `▶ Queue ⌄` |
+| 光标 | 系统 | 自定义黄色 Paul SVG |

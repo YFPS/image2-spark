@@ -1,0 +1,120 @@
+#version 300 es
+
+// 多形状液态玻璃 —— bg pass
+// 渲染：dot-grid + 三色辉光 + 鼠标进入玻璃后的黄光（mainPass 会折射这层）
+
+precision highp float;
+
+#define MAX_SHAPES 8
+
+in vec2 v_uv;
+out vec4 fragColor;
+
+uniform vec2 u_resolution;
+uniform float u_dpr;
+uniform vec2 u_mouse;             // 实际鼠标位置（GLSL 像素坐标）
+uniform float u_shapeRoundness;
+uniform float u_shadowExpand;
+uniform float u_shadowFactor;
+uniform vec2 u_shadowPosition;
+
+// 玻璃形状数组（与 mainPass 共享同一份）
+uniform int u_shapeCount;
+uniform vec2 u_shapeCenters[MAX_SHAPES]; // GLSL 像素坐标
+uniform vec2 u_shapeSizes[MAX_SHAPES];   // (width, height) 像素
+uniform float u_shapeRadii[MAX_SHAPES];  // 圆角像素
+
+float superellipseCornerSDF(vec2 p, float r, float n) {
+  p = abs(p);
+  float v = pow(pow(p.x, n) + pow(p.y, n), 1.0 / n);
+  return v - r;
+}
+
+float roundedRectSDF(vec2 p, vec2 center, float width, float height, float cornerRadius, float n) {
+  p -= center;
+  float cr = cornerRadius * u_dpr;
+  vec2 d = abs(p) - vec2(width * u_dpr, height * u_dpr) * 0.5;
+  float dist;
+  if (d.x > -cr && d.y > -cr) {
+    vec2 cornerCenter = sign(p) * (vec2(width * u_dpr, height * u_dpr) * 0.5 - vec2(cr));
+    vec2 cornerP = p - cornerCenter;
+    dist = superellipseCornerSDF(cornerP, cr, n);
+  } else {
+    dist = min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
+  }
+  return dist;
+}
+
+// 多 shape SDF —— 取所有 shape 的"距离最小值"（即"最近的玻璃边界"）
+float mainSDF(vec2 p) {
+  float minD = 1e9;
+  for (int i = 0; i < MAX_SHAPES; i++) {
+    if (i >= u_shapeCount) break;
+    vec2 center = u_shapeCenters[i];
+    vec2 size = u_shapeSizes[i];
+    float radius = u_shapeRadii[i];
+    vec2 pn = (p - center) / u_resolution.y;
+    float d = roundedRectSDF(
+      pn, vec2(0.0),
+      size.x / u_resolution.y,
+      size.y / u_resolution.y,
+      radius / u_resolution.y,
+      u_shapeRoundness
+    );
+    minD = min(minD, d);
+  }
+  return minD;
+}
+
+// 像素是否在任意玻璃 shape 内
+float pointInGlass(vec2 px) {
+  return 1.0 - step(0.0, mainSDF(px));
+}
+
+vec3 calcCanvasBg(vec2 fragPx) {
+  vec3 bg = vec3(0.051); // #0D0D0D
+
+  // dot-grid
+  float gridSize = 24.0 * u_dpr;
+  vec2 gridP = mod(fragPx, gridSize) - gridSize * 0.5;
+  float dotR = 1.0 * u_dpr;
+  float dotMask = 1.0 - smoothstep(dotR, dotR + 1.0, length(gridP));
+  bg += vec3(1.0) * 0.06 * dotMask;
+
+  // top-left magenta blob
+  vec2 c1 = vec2(u_resolution.x * 0.25, u_resolution.y * 1.0);
+  float d1 = length(fragPx - c1) / (480.0 * u_dpr);
+  bg += vec3(1.0, 0.31, 0.78) * 0.25 * smoothstep(1.0, 0.0, d1);
+  // bottom-right cyan blob
+  vec2 c2 = vec2(u_resolution.x * 0.75, u_resolution.y * 0.0);
+  float d2 = length(fragPx - c2) / (520.0 * u_dpr);
+  bg += vec3(0.31, 0.71, 1.0) * 0.20 * smoothstep(1.0, 0.0, d2);
+  // mid-right violet blob
+  vec2 c3 = vec2(u_resolution.x * 0.90, u_resolution.y * 0.66);
+  float d3 = length(fragPx - c3) / (360.0 * u_dpr);
+  bg += vec3(0.55, 0.39, 1.0) * 0.18 * smoothstep(1.0, 0.0, d3);
+
+  return bg;
+}
+
+void main() {
+  vec2 u_resolution1x = u_resolution.xy / u_dpr;
+
+  vec3 bgColor = calcCanvasBg(gl_FragCoord.xy);
+
+  // 鼠标黄光已关闭 —— Prompt / Negative 卡上看到的黄色发光来自该效果，
+  // 用户认为是 bug，保留则会"溢出卡边"。如要恢复，去掉下面注释即可。
+  float mouseOnGlass = pointInGlass(u_mouse);
+  float fragInGlass = pointInGlass(gl_FragCoord.xy);
+  float mouseRadius = 200.0 * u_dpr;
+  float dm = length(gl_FragCoord.xy - u_mouse) / mouseRadius;
+  float yellowGlow = smoothstep(1.0, 0.0, dm) * mouseOnGlass * fragInGlass;
+  bgColor += vec3(0.94, 1.0, 0.18) * 0.6 * yellowGlow;
+
+  // 玻璃下方软投影（u_shadowFactor 默认 0，关闭）
+  vec2 shadowSamplePos = gl_FragCoord.xy - vec2(u_shadowPosition.x * u_dpr, u_shadowPosition.y * u_dpr);
+  float merged = mainSDF(shadowSamplePos);
+  float shadow = exp(-1.0 / u_shadowExpand * abs(merged) * u_resolution1x.y) * 0.6 * u_shadowFactor;
+
+  fragColor = vec4(bgColor - vec3(shadow), 1.0);
+}
