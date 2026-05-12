@@ -15,10 +15,19 @@ import type {
   ButtonHTMLAttributes,
   MouseEvent as ReactMouseEvent,
   ReactNode,
+  RefObject,
 } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { LiquidGlass, type GlassShape } from "./LiquidGlass";
 import { GlassControls, loadStoredParams, type GlassParams } from "./GlassControls";
+import {
+  generateImages,
+  imageToSrc,
+  GenerateError,
+  type GenerateImage as ApiImage,
+  type GenerateUsage as ApiUsage,
+} from "./api/gptImage";
+import { StickerCropperModal, ScissorsIcon } from "./components/StickerCropperModal";
 
 // 卡片物理尺寸 —— 同时驱动 WebGL 玻璃形状
 // 统一宽度：所有节点 280px；Preview 略宽 320px
@@ -37,10 +46,12 @@ const PREVIEW_GLASS_H = 540;
 const PREVIEW_BAR_GAP = 12;
 const PREVIEW_BAR_H = 56;
 const PREVIEW_CARD_H = PREVIEW_GLASS_H + PREVIEW_BAR_GAP + PREVIEW_BAR_H;
+const GENERATE_CARD_RADIUS = 28;
 
 /* ---------- 类型 & 数据 ---------- */
 type Point = { x: number; y: number };
 type Side = "left" | "right";
+type AppMode = "generate" | "workflow";
 // NodeType = 5 种节点模板（"种类"）。允许同种类多实例
 type NodeType = "model" | "prompt" | "negativePrompt" | "imageGen" | "preview";
 
@@ -161,11 +172,11 @@ type ContextMenuState = {
 
 // 可添加的节点种类清单（菜单项）
 const NODE_TYPE_LIST: { type: NodeType; label: string; color: string }[] = [
-  { type: "model",          label: "Model",           color: C.model },
-  { type: "prompt",         label: "Prompt",          color: C.positive },
-  { type: "negativePrompt", label: "Negative Prompt", color: C.negative },
-  { type: "imageGen",       label: "Image Generator", color: C.image },
-  { type: "preview",        label: "Preview Image",   color: C.image },
+  { type: "model",          label: "模型",           color: C.model },
+  { type: "prompt",         label: "提示词",          color: C.positive },
+  { type: "negativePrompt", label: "负面提示词", color: C.negative },
+  { type: "imageGen",       label: "图像生成器", color: C.image },
+  { type: "preview",        label: "预览图像",   color: C.image },
 ];
 
 // 顶部条占用的高度，鼠标坐标 → 画布层坐标的偏移
@@ -177,9 +188,11 @@ const PORT_HIT_R = 16;
 
 /* ---------- App ---------- */
 export default function App() {
+  const [mode, setMode] = useState<AppMode>("generate");
   const [instances, setInstances] = useState<NodeInstance[]>(INITIAL_INSTANCES);
   const [selectedId, setSelectedId] = useState<string>("model-1");
   const [glassParams, setGlassParams] = useState<GlassParams>(() => loadStoredParams());
+  const [generateGlassShapes, setGenerateGlassShapes] = useState<GlassShape[]>([]);
   const [edges, setEdges] = useState<Edge[]>(INITIAL_EDGES);
   const [draftEdge, setDraftEdge] = useState<DraftEdge | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -361,27 +374,36 @@ export default function App() {
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
 
   // 所有实例的 WebGL 玻璃形状（按 TopBar 高 偏移）
-  const glassShapes: GlassShape[] = instances.map((inst) => {
-    const { w, glassH } = getCardDims(inst.type);
-    return {
-      centerX: inst.position.x + w / 2,
-      centerY: inst.position.y + glassH / 2 + TOPBAR_H,
-      width: w,
-      height: glassH,
-      radius: 32,
-    };
-  });
+  const glassShapes: GlassShape[] =
+    mode === "workflow"
+      ? instances.map((inst) => {
+          const { w, glassH } = getCardDims(inst.type);
+          return {
+            centerX: inst.position.x + w / 2,
+            centerY: inst.position.y + glassH / 2 + TOPBAR_H,
+            width: w,
+            height: glassH,
+            radius: GENERATE_CARD_RADIUS,
+          };
+        })
+      : generateGlassShapes;
 
   return (
     <div className="relative h-screen overflow-hidden">
       {/* WebGL 液态玻璃层（也承担页面 bg：dot-grid + 三色 glow + 鼠标黄光） */}
       <LiquidGlass shapes={glassShapes} params={glassParams} />
 
-      {/* 左侧悬浮面板：实时调节液态玻璃效果 */}
-      <GlassControls params={glassParams} onChange={setGlassParams} />
+      {/* 左侧悬浮面板：仅在节点工作流里调节液态玻璃节点效果 */}
+      {mode === "workflow" && (
+        <GlassControls params={glassParams} onChange={setGlassParams} />
+      )}
 
-      <TopBarReplica />
+      <TopBarReplica mode={mode} onModeChange={setMode} />
 
+      {mode === "generate" ? (
+        <SimpleGenerateView onShapesChange={setGenerateGlassShapes} />
+      ) : (
+        <>
       <div
         className="relative h-[calc(100vh-76px)] overflow-hidden"
         onContextMenu={onCanvasContextMenu}
@@ -463,6 +485,8 @@ export default function App() {
       </div>
 
       <Telemetry />
+        </>
+      )}
     </div>
   );
 }
@@ -476,41 +500,1253 @@ function anchor(pos: Point, node: NodeDef, portId: string) {
   return { x, y, color: port.color };
 }
 
+function SimpleGenerateView({
+  onShapesChange,
+}: {
+  onShapesChange: (shapes: GlassShape[]) => void;
+}) {
+  // 七张外层玻璃壳：左侧栏、参考图、参数、结果、最近作品、底部 Prompt 条、右侧 AI 对话
+  const sidebarRef = useRef<HTMLDivElement | null>(null);
+  const referenceCardRef = useRef<HTMLDivElement | null>(null);
+  const settingsCardRef = useRef<HTMLDivElement | null>(null);
+  const resultsCardRef = useRef<HTMLDivElement | null>(null);
+  const recentCardRef = useRef<HTMLDivElement | null>(null);
+  const chatPanelRef = useRef<HTMLDivElement | null>(null);
+
+  const [activeNav, setActiveNav] = useState("studio");
+  const [sidebarExpanded, setSidebarExpanded] = useState(false);
+  const [chatInput, setChatInput] = useState("");
+
+  // 出图状态
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [results, setResults] = useState<ApiImage[]>([]);
+  const [usage, setUsage] = useState<ApiUsage | null>(null);
+  const [previewSrc, setPreviewSrc] = useState<string | null>(null);
+  const [cropperSrc, setCropperSrc] = useState<string | null>(null);
+
+  // 动态对话气泡（替代硬编码三条 demo）
+  type ChatMsg = { id: number; role: "ai" | "user"; text: string; pending?: boolean };
+  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([
+    {
+      id: 0,
+      role: "ai",
+      text: "你好，把你想生成的画面打在下方输入框里，回车即可出图。",
+    },
+  ]);
+  const chatIdRef = useRef(1);
+
+  // gpt-image-2 受控参数
+  // quality 默认 low：上游通道慢，先求快出图；用户可自行切到 high
+  const [quality, setQuality] = useState("low");
+  const [ratio, setRatio] = useState("1:1");
+  const [resolution, setResolution] = useState("1K");
+  const [n, setN] = useState("1");
+  const [background, setBackground] = useState("auto");
+  const [format, setFormat] = useState("png");
+  const [compression, setCompression] = useState(80);
+  const [moderation, setModeration] = useState("auto");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [customW, setCustomW] = useState(1024);
+  const [customH, setCustomH] = useState(1024);
+  const [stream, setStream] = useState(false);
+  const [partialImages, setPartialImages] = useState("0");
+
+  // 自定义尺寸校验（gpt-image-2 约束）
+  const customSizeError = ratio === "custom" ? validateCustomSize(customW, customH) : null;
+  // 选中"自定"自动展开高级设置区
+  useEffect(() => {
+    if (ratio === "custom") setAdvancedOpen(true);
+  }, [ratio]);
+  // 由 ratio + resolution 推导出实际 size（用于 API 提交 + 显示）
+  const effectiveSize =
+    ratio === "auto"
+      ? "auto"
+      : ratio === "custom"
+        ? customSizeError
+          ? null
+          : `${customW}×${customH}`
+        : (SIZE_TABLE[ratio]?.[resolution] ?? null);
+  const displaySize =
+    ratio === "auto"
+      ? "自动"
+      : ratio === "custom"
+        ? customSizeError
+          ? "无效尺寸"
+          : `${customW}×${customH}`
+        : (effectiveSize ?? "—");
+  // 分辨率行是否禁用
+  const resolutionDisabled = ratio === "auto" || ratio === "custom";
+
+  const canGenerate =
+    !loading && (ratio !== "custom" || customSizeError == null) && chatInput.trim().length > 0;
+
+  const handleGenerate = async () => {
+    const prompt = chatInput.trim();
+    if (!prompt || loading) return;
+    if (ratio === "custom" && customSizeError) {
+      setChatMessages((m) => [
+        ...m,
+        { id: chatIdRef.current++, role: "user", text: prompt },
+        { id: chatIdRef.current++, role: "ai", text: `无法生成：${customSizeError}` },
+      ]);
+      setChatInput("");
+      return;
+    }
+    const apiSize = (effectiveSize ?? "auto").toString();
+    const userMsgId = chatIdRef.current++;
+    const aiPendingId = chatIdRef.current++;
+    setChatMessages((m) => [
+      ...m,
+      { id: userMsgId, role: "user", text: prompt },
+      { id: aiPendingId, role: "ai", text: "生成中", pending: true },
+    ]);
+    setChatInput("");
+    setLoading(true);
+    setErrorMsg(null);
+    try {
+      const resp = await generateImages({
+        prompt,
+        size: apiSize,
+        quality,
+        n: Number(n),
+        background,
+        output_format: format,
+        output_compression: format !== "png" ? compression : undefined,
+        moderation,
+      });
+      setResults(resp.images);
+      setUsage(resp.usage);
+      setChatMessages((m) =>
+        m.map((msg) =>
+          msg.id === aiPendingId
+            ? {
+                ...msg,
+                pending: false,
+                text: `已生成 ${resp.images.length} 张 · ${resp.usage.total_tokens} tokens`,
+              }
+            : msg,
+        ),
+      );
+    } catch (e) {
+      const msg =
+        e instanceof GenerateError
+          ? `${e.apiError.code}：${e.apiError.message}`
+          : e instanceof Error
+            ? e.message
+            : String(e);
+      setErrorMsg(msg);
+      setChatMessages((mm) =>
+        mm.map((m) =>
+          m.id === aiPendingId ? { ...m, pending: false, text: `生成失败：${msg}` } : m,
+        ),
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useLayoutEffect(() => {
+    const refs: RefObject<HTMLElement | null>[] = [
+      sidebarRef,
+      referenceCardRef,
+      settingsCardRef,
+      resultsCardRef,
+      recentCardRef,
+      chatPanelRef,
+    ];
+    const measure = () => {
+      const shapes = refs
+        .map((ref) => ref.current)
+        .filter((el): el is HTMLElement => el !== null)
+        .map((el) => rectToGlassShape(el.getBoundingClientRect()));
+      onShapesChange(shapes);
+    };
+
+    const raf = requestAnimationFrame(measure);
+    const onResize = () => requestAnimationFrame(measure);
+    const observer = new ResizeObserver(() => requestAnimationFrame(measure));
+    refs.forEach((ref) => {
+      if (ref.current) observer.observe(ref.current);
+    });
+    window.addEventListener("resize", onResize);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      observer.disconnect();
+      window.removeEventListener("resize", onResize);
+    };
+  }, [onShapesChange]);
+
+  return (
+    <main className="relative z-20 h-[calc(100vh-76px)] overflow-hidden">
+      <div className="flex h-full gap-3 px-3 pb-4 pt-3">
+        {/* 左侧导航栏（可展开） */}
+        <aside
+          ref={sidebarRef}
+          className="flex shrink-0 flex-col rounded-[28px] px-2.5 py-4 transition-[width] duration-200"
+          style={{ width: sidebarExpanded ? 220 : 72 }}
+        >
+          {/* Logo 行 */}
+          <div
+            className={`flex items-center ${
+              sidebarExpanded ? "justify-between gap-2 px-1" : "justify-center"
+            }`}
+          >
+            <div className="flex min-w-0 items-center gap-2">
+              <div className="grid h-10 w-10 shrink-0 place-items-center rounded-[14px] bg-accent-foxo text-[14px] font-semibold text-[#0D0D0D]">
+                ✦
+              </div>
+              {sidebarExpanded && (
+                <span className="truncate text-[14px] font-semibold tracking-tight text-white/92">
+                  Foxo
+                </span>
+              )}
+            </div>
+            {sidebarExpanded && (
+              <button
+                onClick={() => setSidebarExpanded(false)}
+                title="收起"
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-[10px] text-white/50 hover:bg-white/[0.06] hover:text-white/85"
+              >
+                <ChevronIcon direction="left" />
+              </button>
+            )}
+          </div>
+
+          {/* 收起态：切换按钮独立成一行居中 */}
+          {!sidebarExpanded && (
+            <button
+              onClick={() => setSidebarExpanded(true)}
+              title="展开"
+              className="mx-auto mt-3 grid h-6 w-11 place-items-center rounded-[10px] bg-white/[0.04] text-white/55 hover:bg-white/[0.08] hover:text-white/90"
+            >
+              <ChevronIcon direction="right" />
+            </button>
+          )}
+
+          {/* 导航项 */}
+          <div className="mt-4 flex flex-col gap-1">
+            {SIDEBAR_ITEMS.map((it) => (
+              <SidebarItem
+                key={it.key}
+                icon={it.icon}
+                label={it.label}
+                active={activeNav === it.key}
+                expanded={sidebarExpanded}
+                onClick={() => setActiveNav(it.key)}
+              />
+            ))}
+          </div>
+
+          <div className="flex-1" />
+
+          {/* 底部：设置 + 头像 */}
+          <SidebarItem icon={<GearIcon />} label="设置" expanded={sidebarExpanded} />
+
+          <div
+            className={`mt-3 flex items-center gap-2 rounded-[14px] border border-white/[0.04] bg-white/[0.03] ${
+              sidebarExpanded ? "px-2.5 py-2" : "h-11 w-11 justify-center self-center"
+            }`}
+          >
+            <div className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-accent-foxo/20 text-[12px] font-semibold text-accent-foxo">
+              M
+            </div>
+            {sidebarExpanded && (
+              <div className="flex min-w-0 flex-col">
+                <span className="truncate text-[12px] font-medium text-white/86">Maya Chen</span>
+                <span className="truncate text-[10px] text-white/40">Free plan</span>
+              </div>
+            )}
+          </div>
+        </aside>
+
+        {/* 中部主区 */}
+        <div className="flex min-w-0 flex-1 flex-col gap-3">
+          {/* 顶部标题（贴外、不进卡） */}
+          <div className="flex shrink-0 items-center justify-between gap-3 px-1">
+            <div className="flex items-center gap-3">
+              <StatusDot selected />
+              <h1 className="text-[22px] font-medium leading-tight text-white/95">图像生成</h1>
+              <span className="text-[12px] text-white/45">借助 AI 创作画面 · gpt-image-2</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button className="rounded-full bg-white/[0.04] px-3 py-1.5 text-[12px] font-medium text-white/72 hover:bg-white/[0.08]">
+                我的模板
+              </button>
+              <button className="rounded-full bg-accent-foxo px-3.5 py-1.5 text-[12px] font-semibold text-[#0D0D0D] shadow-generate-glow">
+                + 新建项目
+              </button>
+            </div>
+          </div>
+
+          {/* 主区：左（紧凑参考图 + 大参数卡）| 右（结果） */}
+          <div className="grid min-h-0 flex-1 grid-cols-[360px_1fr] gap-3">
+            {/* 左列：参考图紧凑条 + 参数撑满 */}
+            <div className="flex min-h-0 flex-col gap-3">
+              {/* 参考图（紧凑条）*/}
+              <div
+                ref={referenceCardRef}
+                className="flex shrink-0 items-center gap-3 rounded-[24px] px-4 py-3"
+              >
+                <div className="grid h-11 w-11 shrink-0 place-items-center rounded-[14px] border border-dashed border-white/[0.10] bg-[#141418] text-white/55">
+                  <UploadIcon />
+                </div>
+                <div className="flex min-w-0 flex-1 flex-col">
+                  <span className="text-[12px] font-medium text-white/86">参考图</span>
+                  <span className="text-[11px] text-white/40">可选 · 拖拽或点击上传</span>
+                </div>
+                <button
+                  title="遮罩"
+                  className="grid h-9 w-9 place-items-center rounded-[12px] border border-white/[0.04] bg-[#141418] text-white/55 hover:bg-[#16161a]"
+                >
+                  <MaskIcon />
+                </button>
+                <button
+                  title="添加图层"
+                  className="grid h-9 w-9 place-items-center rounded-[12px] border border-white/[0.04] bg-[#141418] text-white/55 hover:bg-[#16161a]"
+                >
+                  +
+                </button>
+              </div>
+
+              {/* 参数卡（撑满左列） */}
+              <div
+                ref={settingsCardRef}
+                className="flex min-h-0 flex-1 flex-col rounded-[28px] p-5"
+              >
+              <div className="mb-3 flex shrink-0 items-center justify-between">
+                <span className="text-[13px] font-medium text-white/92">参数</span>
+                <span className="text-[11px] text-white/35">gpt-image-2</span>
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-y-auto rounded-[20px] border border-white/[0.04] bg-[#1e1e22] p-4 [scrollbar-color:rgba(255,255,255,0.16)_transparent] [scrollbar-width:thin] [scrollbar-gutter:stable]">
+                {/* 比例：7 段，使用堆叠版式（标签在上、segmented 全宽）以容纳 16:9/9:16 */}
+                <div className="mb-2.5">
+                  <div className="mb-1.5 text-[11px] text-white/45">比例</div>
+                  <PillGroup
+                    value={ratio}
+                    onChange={setRatio}
+                    options={[
+                      { value: "auto", label: "自动" },
+                      { value: "1:1", label: "1:1" },
+                      { value: "16:9", label: "16:9" },
+                      { value: "9:16", label: "9:16" },
+                      { value: "2:3", label: "2:3" },
+                      { value: "3:2", label: "3:2" },
+                      { value: "custom", label: "自定" },
+                    ]}
+                  />
+                </div>
+
+                <SettingsGroup label="分辨率">
+                  <PillGroup
+                    value={resolution}
+                    onChange={setResolution}
+                    disabled={resolutionDisabled}
+                    options={[
+                      { value: "1K", label: "1K" },
+                      { value: "2K", label: "2K" },
+                      { value: "4K", label: "4K" },
+                    ]}
+                  />
+                </SettingsGroup>
+
+                <SettingsGroup label="质量">
+                  <PillGroup
+                    value={quality}
+                    onChange={setQuality}
+                    options={["auto", "low", "medium", "high"].map((v) => ({
+                      value: v,
+                      label: v,
+                    }))}
+                  />
+                </SettingsGroup>
+
+                <SettingsGroup label="数量">
+                  <PillGroup
+                    value={n}
+                    onChange={setN}
+                    options={["1", "2", "4", "6", "8", "10"].map((v) => ({ value: v, label: v }))}
+                  />
+                </SettingsGroup>
+
+                <SettingsGroup label="背景">
+                  <PillGroup
+                    value={background}
+                    onChange={setBackground}
+                    options={[
+                      { value: "auto", label: "自动" },
+                      { value: "opaque", label: "不透明" },
+                    ]}
+                  />
+                </SettingsGroup>
+
+                <SettingsGroup label="格式">
+                  <PillGroup
+                    value={format}
+                    onChange={setFormat}
+                    options={["png", "jpeg", "webp"].map((v) => ({
+                      value: v,
+                      label: v.toUpperCase(),
+                    }))}
+                  />
+                </SettingsGroup>
+
+                <button
+                  onClick={() => setAdvancedOpen((v) => !v)}
+                  className="mt-1 flex w-full items-center justify-between rounded-[14px] border border-white/[0.04] bg-[#141418] px-4 py-3 text-[12px] text-white/68 hover:bg-[#16161a]"
+                >
+                  <span>高级设置</span>
+                  <span className={`transition-transform ${advancedOpen ? "rotate-180" : ""}`}>
+                    ▾
+                  </span>
+                </button>
+
+                {advancedOpen && (
+                  <div className="mt-3 space-y-3">
+                    {/* 自定义尺寸（仅当比例选中"自定义"时显示） */}
+                    {ratio === "custom" && (
+                      <div
+                        className={`rounded-[14px] border bg-[#141418] px-4 py-3 ${
+                          customSizeError ? "border-red-500/40" : "border-white/[0.04]"
+                        }`}
+                      >
+                        <div className="mb-2 flex items-center justify-between text-[11px] text-white/45">
+                          <span>自定义尺寸</span>
+                          <span className="tnum text-white/55">px · 16 倍数 · ≤3840</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            value={customW}
+                            onChange={(e) => setCustomW(Number(e.target.value))}
+                            className={`min-w-0 flex-1 rounded-[10px] bg-[#0E0E11] px-3 py-2 text-[12px] text-white/86 outline-none ring-1 ring-inset ${
+                              customSizeError ? "ring-red-500/50" : "ring-white/[0.06]"
+                            }`}
+                          />
+                          <span className="text-white/40">×</span>
+                          <input
+                            type="number"
+                            value={customH}
+                            onChange={(e) => setCustomH(Number(e.target.value))}
+                            className={`min-w-0 flex-1 rounded-[10px] bg-[#0E0E11] px-3 py-2 text-[12px] text-white/86 outline-none ring-1 ring-inset ${
+                              customSizeError ? "ring-red-500/50" : "ring-white/[0.06]"
+                            }`}
+                          />
+                        </div>
+                        {customSizeError && (
+                          <p className="mt-2 text-[11px] text-red-400/85">{customSizeError}</p>
+                        )}
+                      </div>
+                    )}
+
+                    <SettingsGroup label="审核">
+                      <PillGroup
+                        value={moderation}
+                        onChange={setModeration}
+                        options={[
+                          { value: "auto", label: "auto" },
+                          { value: "low", label: "low" },
+                        ]}
+                      />
+                    </SettingsGroup>
+
+                    {/* 流式开关（当前中转商不支持 SSE，整块置灰 + 提示） */}
+                    <div
+                      title="当前中转接口不支持 SSE 流式传输（探针验证 Content-Type 为 application/json），切换无效"
+                      className="cursor-not-allowed rounded-[14px] border border-white/[0.04] bg-[#141418] px-4 py-3 opacity-45"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex flex-col">
+                          <span className="flex items-center gap-1.5 text-[12px] text-white/86">
+                            流式生成
+                            <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[9.5px] text-white/55">
+                              暂不可用
+                            </span>
+                          </span>
+                          <span className="text-[10.5px] text-white/40">
+                            当前接口不支持 · 待中转商提供 SSE 透传后启用
+                          </span>
+                        </div>
+                        <button
+                          disabled
+                          className="relative h-5 w-9 shrink-0 cursor-not-allowed rounded-full bg-white/[0.10]"
+                        >
+                          <span className="absolute left-0.5 top-0.5 h-4 w-4 translate-x-0 rounded-full bg-white/60 shadow" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {format !== "png" && (
+                      <div className="rounded-[14px] border border-white/[0.04] bg-[#141418] px-4 py-3">
+                        <div className="flex items-center justify-between text-[11px] text-white/45">
+                          <span>压缩率</span>
+                          <span className="tnum text-white/72">{compression}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={compression}
+                          onChange={(e) => setCompression(Number(e.target.value))}
+                          className="mt-2 w-full accent-accent-foxo"
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* 右列：结果 */}
+          <div
+            ref={resultsCardRef}
+            className="flex min-h-0 flex-col rounded-[28px] p-5"
+          >
+            <div className="mb-3 flex shrink-0 items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <span className="text-[13px] font-medium text-white/92">结果</span>
+                <span className="text-[11px] text-white/42">
+                  {n} 张 · {displaySize} · {quality}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <MetricChip label="In" value={usage ? String(usage.input_tokens) : "—"} />
+                <MetricChip label="Out" value={usage ? String(usage.output_tokens) : "—"} />
+                <MetricChip label="Total" value={usage ? String(usage.total_tokens) : "—"} />
+                <button
+                  disabled={!results.length}
+                  className="rounded-full bg-white/[0.04] px-3 py-1.5 text-[12px] font-medium text-white/68 hover:bg-white/[0.08] disabled:opacity-40"
+                >
+                  下载
+                </button>
+                <button
+                  disabled={!results.length}
+                  className="rounded-full bg-white px-3 py-1.5 text-[12px] font-medium text-[#0D0D0D] disabled:opacity-40"
+                >
+                  分享
+                </button>
+              </div>
+            </div>
+
+            <div className="min-h-0 flex-1">
+              {loading ? (
+                <div className="grid h-full place-items-center rounded-[20px] border border-white/[0.04] bg-[#111114]">
+                  <div className="flex flex-col items-center gap-3 text-white/55">
+                    <Spinner />
+                    <span className="text-[12px]">正在生成…</span>
+                  </div>
+                </div>
+              ) : errorMsg && results.length === 0 ? (
+                <div className="grid h-full place-items-center rounded-[20px] border border-red-500/30 bg-[#1a0e10] px-6 text-center">
+                  <div className="flex flex-col items-center gap-2">
+                    <span className="text-[13px] font-medium text-red-400">生成失败</span>
+                    <span className="max-w-[640px] truncate text-[12px] text-white/55">
+                      {errorMsg}
+                    </span>
+                  </div>
+                </div>
+              ) : results.length === 0 ? (
+                <div className="grid h-full place-items-center rounded-[20px] border border-dashed border-white/[0.06] bg-[#0E0E11] text-[12px] text-white/35">
+                  在右侧聊天框输入提示词，回车开始你的第一张作品
+                </div>
+              ) : results.length === 1 ? (
+                <ResultImage img={results[0]} format={format} large onPreview={setPreviewSrc} onCropper={setCropperSrc} />
+              ) : (
+                <div
+                  className={`grid h-full gap-3 ${
+                    results.length <= 4 ? "grid-cols-2" : "grid-cols-3"
+                  }`}
+                >
+                  {results.map((img, i) => (
+                    <ResultImage
+                      key={i}
+                      img={img}
+                      format={format}
+                      onPreview={setPreviewSrc}
+                      onCropper={setCropperSrc}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* 最近作品横滑 */}
+        <div
+          ref={recentCardRef}
+          className="flex shrink-0 flex-col rounded-[28px] p-4"
+        >
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-[12px] font-medium text-white/82">最近作品</span>
+            <button className="text-[11px] text-white/45 hover:text-white/72">查看全部</button>
+          </div>
+          <div className="flex gap-3 overflow-x-auto pb-1 [scrollbar-color:rgba(255,255,255,0.16)_transparent] [scrollbar-width:thin] [scrollbar-gutter:stable]">
+            {["刚刚", "2 小时前", "昨天", "2 天前", "3 天前"].map((t) => (
+              <div
+                key={t}
+                className="relative h-[84px] w-[120px] shrink-0 overflow-hidden rounded-[14px] border border-white/[0.05] bg-[#111114]"
+              >
+                <DemoBearArtwork />
+                <span className="absolute left-2 top-2 rounded-full bg-black/55 px-2 py-0.5 text-[10px] text-white/82">
+                  {t}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        </div>
+
+        {/* 右侧 AI 对话面板 */}
+        <aside
+          ref={chatPanelRef}
+          className="flex shrink-0 flex-col gap-3 rounded-[28px] p-4"
+          style={{ width: 340 }}
+        >
+          <div className="flex shrink-0 items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="grid h-7 w-7 place-items-center rounded-full bg-accent-foxo/15 text-accent-foxo">
+                <SparkleIcon />
+              </span>
+              <span className="text-[13px] font-medium text-white/92">AI 助手</span>
+            </div>
+            <button className="text-[11px] text-white/45 hover:text-white/72">新对话</button>
+          </div>
+
+          {/* 消息区 */}
+          <div className="min-h-0 flex-1 overflow-y-auto rounded-[20px] border border-white/[0.04] bg-[#1e1e22] p-3 [scrollbar-color:rgba(255,255,255,0.16)_transparent] [scrollbar-width:thin] [scrollbar-gutter:stable]">
+            <div className="space-y-3 text-[12.5px] leading-relaxed">
+              {chatMessages.map((m) => (
+                <ChatBubble key={m.id} role={m.role} pending={m.pending}>
+                  {m.text}
+                </ChatBubble>
+              ))}
+            </div>
+          </div>
+
+          {/* 输入条：回车或点按钮触发生成 */}
+          <div className="flex shrink-0 items-center gap-2 rounded-[18px] border border-white/[0.04] bg-[#141418] px-3 py-2">
+            <input
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleGenerate();
+                }
+              }}
+              placeholder={loading ? "生成中…" : "描述你想生成的画面，回车出图"}
+              disabled={loading}
+              className="min-w-0 flex-1 bg-transparent text-[13px] text-white/90 placeholder:text-white/32 focus:outline-none disabled:opacity-50"
+            />
+            <button
+              onClick={handleGenerate}
+              disabled={!canGenerate}
+              title={canGenerate ? "出图" : loading ? "生成中" : "输入提示词后回车"}
+              className="grid h-8 w-8 place-items-center rounded-full bg-accent-foxo text-[#0D0D0D] disabled:opacity-40"
+            >
+              {loading ? <Spinner small /> : <SendIcon />}
+            </button>
+          </div>
+        </aside>
+      </div>
+
+      {/* 图片预览遮罩 */}
+      {previewSrc && <ImagePreviewModal src={previewSrc} onClose={() => setPreviewSrc(null)} />}
+
+      {/* 抠图工具 */}
+      {cropperSrc && (
+        <StickerCropperModal src={cropperSrc} onClose={() => setCropperSrc(null)} />
+      )}
+    </main>
+  );
+}
+
+/* 参数分组：标签在左、分段控件在右，整体对齐成表格行 */
+function SettingsGroup({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="mb-2.5 flex items-center gap-3 last:mb-0">
+      <div className="w-10 shrink-0 text-[11px] text-white/45">{label}</div>
+      <div className="min-w-0 flex-1">{children}</div>
+    </div>
+  );
+}
+
+/* 等宽分段控件（segmented control） */
+function PillGroup({
+  value,
+  onChange,
+  options,
+  disabled,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: ReadonlyArray<{ value: string; label: string }>;
+  disabled?: boolean;
+}) {
+  return (
+    <div
+      className={`flex w-full rounded-full border border-white/[0.04] bg-[#141418] p-[3px] transition-opacity ${
+        disabled ? "pointer-events-none opacity-45" : ""
+      }`}
+    >
+      {options.map((opt) => {
+        const active = opt.value === value;
+        return (
+          <button
+            key={opt.value}
+            onClick={() => !disabled && onChange(opt.value)}
+            className={`min-w-0 flex-1 rounded-full px-1.5 py-1.5 text-center text-[12px] font-medium transition-colors ${
+              active
+                ? "bg-white/[0.10] text-white/95 ring-1 ring-inset ring-white/15"
+                : "text-white/55 hover:bg-white/[0.04] hover:text-white/85"
+            }`}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* 内联指标小芯片 */
+function MetricChip({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center gap-1.5 rounded-full bg-white/[0.04] px-2.5 py-1 text-[11px]">
+      <span className="text-white/40">{label}</span>
+      <span className="tnum text-white/82">{value}</span>
+    </div>
+  );
+}
+
+/* 上传 / 附件 / 图片 图标 */
+function UploadIcon() {
+  return (
+    <svg
+      width="22"
+      height="22"
+      viewBox="0 0 22 22"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M11 14V4M11 4l-3.5 3.5M11 4l3.5 3.5M4 15v1.5A1.5 1.5 0 0 0 5.5 18h11a1.5 1.5 0 0 0 1.5-1.5V15" />
+    </svg>
+  );
+}
+
+function AttachIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M9.5 5.5L5 10a2 2 0 0 0 2.83 2.83l5-5a3.5 3.5 0 1 0-4.95-4.95l-5.5 5.5a5 5 0 0 0 7.07 7.07L13.5 11" />
+    </svg>
+  );
+}
+
+function ImageIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="2" y="3" width="12" height="10" rx="1.5" />
+      <circle cx="5.5" cy="6.5" r="1" />
+      <path d="M14 11l-3-3-4 4-2-2-3 3" />
+    </svg>
+  );
+}
+
+/* ---------- 侧栏 / 聊天 ---------- */
+const SIDEBAR_ITEMS: ReadonlyArray<{ key: string; label: string; icon: ReactNode }> = [
+  { key: "studio", label: "工作室", icon: <StudioIcon /> },
+  { key: "gallery", label: "画廊", icon: <GalleryIcon /> },
+  { key: "inspiration", label: "灵感", icon: <InspirationIcon /> },
+  { key: "models", label: "模型", icon: <ModelsIcon /> },
+  { key: "history", label: "历史", icon: <HistoryIcon /> },
+];
+
+function SidebarItem({
+  icon,
+  label,
+  active,
+  expanded,
+  onClick,
+}: {
+  icon: ReactNode;
+  label: string;
+  active?: boolean;
+  expanded?: boolean;
+  onClick?: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={expanded ? undefined : label}
+      className={`group relative flex h-11 items-center rounded-[14px] transition-colors ${
+        expanded ? "w-full gap-3 px-3" : "w-11 justify-center self-center"
+      } ${
+        active
+          ? "bg-white/[0.08] text-white/95"
+          : "text-white/55 hover:bg-white/[0.04] hover:text-white/85"
+      }`}
+    >
+      {/* 选中态左侧黄色竖条 */}
+      {active && (
+        <span className="pointer-events-none absolute left-1 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-accent-foxo shadow-[0_0_8px_rgba(204,255,0,0.55)]" />
+      )}
+      <span
+        className={`grid h-5 w-5 shrink-0 place-items-center transition-colors ${
+          active ? "text-accent-foxo" : ""
+        }`}
+      >
+        {icon}
+      </span>
+      {expanded && <span className="truncate text-[13px] font-medium">{label}</span>}
+    </button>
+  );
+}
+
+function ChevronIcon({ direction = "right" }: { direction?: "left" | "right" }) {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ transform: direction === "left" ? "rotate(180deg)" : "none" }}
+    >
+      <path d="M6 3l5 5-5 5" />
+    </svg>
+  );
+}
+
+function ChatBubble({
+  role,
+  pending,
+  children,
+}: {
+  role: "ai" | "user";
+  pending?: boolean;
+  children: ReactNode;
+}) {
+  const isUser = role === "user";
+  return (
+    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+      <div
+        className={`max-w-[88%] rounded-[14px] px-3 py-2 ${
+          isUser
+            ? "bg-accent-foxo/14 text-white/92 ring-1 ring-inset ring-accent-foxo/30"
+            : pending
+              ? "thinking-shimmer text-white/82 ring-1 ring-inset ring-white/[0.06]"
+              : "bg-[#141418] text-white/82 ring-1 ring-inset ring-white/[0.04]"
+        }`}
+      >
+        {pending ? (
+          <span className="flex items-center gap-2">
+            <ThinkingDots />
+            <span className="thinking-text">{children}</span>
+          </span>
+        ) : (
+          children
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Cursor 风格的"思考中"三连小圆点：交错跳动 */
+function ThinkingDots() {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span className="thinking-dot" style={{ animationDelay: "0ms" }} />
+      <span className="thinking-dot" style={{ animationDelay: "180ms" }} />
+      <span className="thinking-dot" style={{ animationDelay: "360ms" }} />
+    </span>
+  );
+}
+
+/* 侧栏图标（极简描边） */
+function StudioIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 11l7-7 7 7" />
+      <path d="M5 9v7a1 1 0 0 0 1 1h3v-5h2v5h3a1 1 0 0 0 1-1V9" />
+    </svg>
+  );
+}
+function GalleryIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="14" height="14" rx="2" />
+      <circle cx="7" cy="8" r="1.4" />
+      <path d="M17 13l-4-4-7 7" />
+    </svg>
+  );
+}
+function InspirationIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M10 2.5l1.8 4.4 4.7.4-3.6 3.1 1.1 4.6L10 12.6 6 15l1.1-4.6L3.5 7.3l4.7-.4L10 2.5z" />
+    </svg>
+  );
+}
+function ModelsIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="14" height="4" rx="1.2" />
+      <rect x="3" y="12" width="14" height="4" rx="1.2" />
+    </svg>
+  );
+}
+function HistoryIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="10" cy="10" r="7" />
+      <path d="M10 6v4l2.5 2" />
+    </svg>
+  );
+}
+function GearIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="10" cy="10" r="2.4" />
+      <path d="M16.5 10a6.5 6.5 0 0 0-.1-1.1l1.5-1.1-1.3-2.2-1.7.6a6.5 6.5 0 0 0-1.9-1.1L12.7 3h-2.6l-.3 2.1a6.5 6.5 0 0 0-1.9 1.1l-1.7-.6L4.9 7.8l1.5 1.1a6.5 6.5 0 0 0 0 2.2L4.9 12.2l1.3 2.2 1.7-.6a6.5 6.5 0 0 0 1.9 1.1l.3 2.1h2.6l.3-2.1a6.5 6.5 0 0 0 1.9-1.1l1.7.6 1.3-2.2-1.5-1.1c.07-.36.1-.73.1-1.1z" />
+    </svg>
+  );
+}
+function MaskIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="7.5" cy="10" r="4.5" />
+      <circle cx="12.5" cy="10" r="4.5" />
+    </svg>
+  );
+}
+function Spinner({ small }: { small?: boolean }) {
+  const size = small ? 14 : 22;
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      className="animate-spin"
+    >
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.25" strokeWidth="3" />
+      <path
+        d="M12 3a9 9 0 0 1 9 9"
+        stroke="currentColor"
+        strokeWidth="3"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/** 真实出图 tile：优先 url；否则 b64_json → data URI；hover 时露出抠图 + 放大预览两个按钮 */
+function ResultImage({
+  img,
+  format,
+  large,
+  onPreview,
+  onCropper,
+}: {
+  img: ApiImage;
+  format: string;
+  large?: boolean;
+  onPreview?: (src: string) => void;
+  onCropper?: (src: string) => void;
+}) {
+  const src = imageToSrc(img, format);
+  return (
+    <article
+      className={`group relative w-full overflow-hidden rounded-[20px] border border-white/[0.05] bg-[#111114] ${
+        large ? "h-full" : "h-full min-h-[180px]"
+      }`}
+    >
+      {src ? (
+        <img src={src} alt="" className="h-full w-full object-cover" draggable={false} />
+      ) : (
+        <div className="grid h-full place-items-center text-[12px] text-white/35">无图像数据</div>
+      )}
+
+      {src && (
+        <div className="absolute right-3 top-3 flex items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100">
+          <button
+            onClick={() => onCropper?.(src)}
+            title="抠图（框选 → 透明 PNG → ZIP）"
+            className="grid h-9 w-9 place-items-center rounded-full border border-white/[0.10] bg-[#17171b]/82 text-white/82 backdrop-blur-md hover:bg-[#1e1e22]"
+          >
+            <ScissorsIcon />
+          </button>
+          <button
+            onClick={() => onPreview?.(src)}
+            title="放大预览"
+            className="grid h-9 w-9 place-items-center rounded-full border border-white/[0.10] bg-[#17171b]/82 text-white/82 backdrop-blur-md hover:bg-[#1e1e22]"
+          >
+            <PreviewIcon />
+          </button>
+        </div>
+      )}
+    </article>
+  );
+}
+
+function PreviewIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M9 2h5v5M14 2l-5 5M7 14H2v-5M2 14l5-5" />
+    </svg>
+  );
+}
+
+/** 全屏图片预览遮罩：点背景或 ESC 关闭 */
+function ImagePreviewModal({ src, onClose }: { src: string; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      onClick={onClose}
+      className="fixed inset-0 z-[100] grid place-items-center bg-black/82 backdrop-blur-md"
+    >
+      <img
+        src={src}
+        alt=""
+        onClick={(e) => e.stopPropagation()}
+        className="max-h-[92vh] max-w-[92vw] rounded-[12px] border border-white/[0.08] shadow-2xl"
+        draggable={false}
+      />
+      <button
+        onClick={onClose}
+        title="关闭"
+        className="absolute right-6 top-6 grid h-10 w-10 place-items-center rounded-full border border-white/[0.08] bg-[#17171b]/82 text-white/80 backdrop-blur-md hover:bg-[#1e1e22]"
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
+function SendIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M1.5 8L14.5 2 9.5 14l-2-5-6-1z" />
+    </svg>
+  );
+}
+
+/* gpt-image-2 比例 × 分辨率 → 实际 size 映射表
+   每一项均满足：16 倍数 / 单边 ≤3840 / 总像素 ∈ [655360, 8294400] / 比例 ≤3:1 */
+const SIZE_TABLE: Record<string, Record<string, string>> = {
+  "1:1":  { "1K": "1024×1024", "2K": "2048×2048", "4K": "2880×2880" },
+  "16:9": { "1K": "1792×1024", "2K": "2048×1152", "4K": "3840×2160" },
+  "9:16": { "1K": "1024×1792", "2K": "1152×2048", "4K": "2160×3840" },
+  "2:3":  { "1K": "1024×1536", "2K": "1536×2304", "4K": "2304×3456" },
+  "3:2":  { "1K": "1536×1024", "2K": "2304×1536", "4K": "3456×2304" },
+};
+
+/* gpt-image-2 自定义尺寸校验：返回 null 表示通过，字符串为错误提示 */
+function validateCustomSize(w: number, h: number): string | null {
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+    return "宽高必须是正整数";
+  }
+  if (!Number.isInteger(w) || !Number.isInteger(h)) {
+    return "宽高必须是整数";
+  }
+  if (w % 16 !== 0 || h % 16 !== 0) {
+    return "宽高必须是 16 的倍数";
+  }
+  if (w > 3840 || h > 3840) {
+    return "单边不能超过 3840";
+  }
+  const total = w * h;
+  if (total < 655_360) {
+    return "总像素需 ≥ 655,360";
+  }
+  if (total > 8_294_400) {
+    return "总像素需 ≤ 8,294,400";
+  }
+  const ratio = Math.max(w, h) / Math.min(w, h);
+  if (ratio > 3) {
+    return "宽高比不能超过 3:1";
+  }
+  return null;
+}
+
+function rectToGlassShape(rect: DOMRect): GlassShape {
+  return {
+    centerX: rect.left + rect.width / 2,
+    centerY: rect.top + rect.height / 2,
+    width: rect.width,
+    height: rect.height,
+    radius: GENERATE_CARD_RADIUS,
+  };
+}
+
+function GenerateField({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options?: readonly string[];
+  onChange?: (v: string) => void;
+}) {
+  const opts = options ?? [value];
+  return (
+    <label className="block rounded-[14px] border border-white/[0.04] bg-[#141418] px-3 py-3">
+      <span className="mb-2 block text-[11px] text-white/42">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange?.(e.target.value)}
+        className="w-full bg-transparent text-[13px] font-medium text-white/86 outline-none [&>option]:bg-[#141418] [&>option]:text-white/86"
+      >
+        {opts.map((o) => (
+          <option key={o} value={o}>
+            {o}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function ResultTile({ large = false }: { large?: boolean }) {
+  return (
+    <article className="group relative h-full w-full overflow-hidden rounded-[20px] border border-white/[0.05] bg-[#111114]">
+      <div className={large ? "h-full" : "h-full min-h-[180px]"}>
+        <DemoBearArtwork />
+      </div>
+      <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between rounded-full border border-white/[0.08] bg-[#17171b]/86 px-3 py-2 opacity-0 transition-opacity group-hover:opacity-100">
+        <span className="text-[12px] text-white/70">PNG / 1x</span>
+        <div className="flex items-center gap-2 text-white/64">
+          <CopyIcon />
+          <DownloadIcon />
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function MiniMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-[72px] rounded-[14px] border border-white/[0.04] bg-[#141418] px-3 py-2">
+      <div className="text-[10px] text-white/35">{label}</div>
+      <div className="tnum mt-1 text-[12px] text-white/74">{value}</div>
+    </div>
+  );
+}
+
 /* ---------- 顶部条（按参考图 1:1 复刻） ---------- */
-function TopBarReplica() {
+function TopBarReplica({
+  mode,
+  onModeChange,
+}: {
+  mode: AppMode;
+  onModeChange: (mode: AppMode) => void;
+}) {
   return (
     <header className="relative z-30 flex h-[76px] items-start px-3 pt-3">
       <nav className="flex items-center gap-1.5">
-        <TopBarTab active>Workflow</TopBarTab>
-        <TopBarTab>Edit</TopBarTab>
-        <TopBarTab>Help</TopBarTab>
+        <TopBarTab active>
+          {mode === "generate" ? "生成" : "工作流"}
+        </TopBarTab>
+        <TopBarTab onClick={() => onModeChange(mode === "generate" ? "workflow" : "generate")}>
+          切换模式
+        </TopBarTab>
+        <TopBarTab>帮助</TopBarTab>
       </nav>
 
       <div className="absolute left-1/2 top-3 flex -translate-x-1/2 items-center gap-2">
-        <TopBarIconButton aria-label="Previous project">
+        <TopBarIconButton aria-label="上一个项目">
           <TopBarChevron dir="left" />
         </TopBarIconButton>
         <TopBarProjectTab />
-        <TopBarIconButton aria-label="Next project">
+        <TopBarIconButton aria-label="下一个项目">
           <TopBarChevron dir="right" />
         </TopBarIconButton>
       </div>
 
       <div className="ml-auto flex items-center gap-2">
-        <TopBarIconButton aria-label="More options">
-          <TopBarDots />
-        </TopBarIconButton>
-        <TopBarQueueButton />
-        <TopBarStepper />
-        <TopBarIconButton aria-label="Close">
-          <TopBarClose />
-        </TopBarIconButton>
-        <TopBarIconButton aria-label="Snapshot">
-          <TopBarCamera />
-        </TopBarIconButton>
-        <TopBarIconButton aria-label="Menu">
-          <TopBarMenu />
-        </TopBarIconButton>
+        {mode === "workflow" ? (
+          <>
+            <TopBarIconButton aria-label="更多选项">
+              <TopBarDots />
+            </TopBarIconButton>
+            <TopBarQueueButton />
+            <TopBarStepper />
+            <TopBarIconButton aria-label="关闭">
+              <TopBarClose />
+            </TopBarIconButton>
+            <TopBarIconButton aria-label="截图">
+              <TopBarCamera />
+            </TopBarIconButton>
+            <TopBarIconButton aria-label="菜单">
+              <TopBarMenu />
+            </TopBarIconButton>
+          </>
+        ) : (
+          <>
+            <button className="rounded-full bg-accent-foxo px-5 py-3 text-[13px] font-semibold leading-none text-[#0D0D0D] shadow-generate-glow">
+              生成
+            </button>
+            <button className="rounded-full bg-white px-5 py-3 text-[13px] font-medium leading-none text-[#0D0D0D]">
+              分享
+            </button>
+            <TopBarIconButton aria-label="菜单">
+              <TopBarMenu />
+            </TopBarIconButton>
+          </>
+        )}
       </div>
     </header>
   );
@@ -519,9 +1755,9 @@ function TopBarReplica() {
     <header className="relative z-30 flex h-14 items-center gap-3 px-6">
       {/* 左：螺旋 logo + Workflow/Edit/Help 胶囊 */}
       <Logo />
-      <PillTab active>Workflow</PillTab>
-      <PillTab>Edit</PillTab>
-      <PillTab>Help</PillTab>
+      <PillTab active>工作流</PillTab>
+      <PillTab>编辑</PillTab>
+      <PillTab>帮助</PillTab>
 
       {/* 中：项目 tab 导航（绝对居中，不受左右占位影响） */}
       <div className="absolute left-1/2 flex -translate-x-1/2 items-center gap-2">
@@ -567,9 +1803,18 @@ function topBarSurface(active = false) {
   ].join(" ");
 }
 
-function TopBarTab({ children, active = false }: { children: ReactNode; active?: boolean }) {
+function TopBarTab({
+  children,
+  active = false,
+  onClick,
+}: {
+  children: ReactNode;
+  active?: boolean;
+  onClick?: () => void;
+}) {
   return (
     <button
+      onClick={onClick}
       className={`h-12 min-w-[110px] rounded-[10px] px-6 text-[13px] font-medium ${topBarSurface(active)}`}
     >
       {children}
@@ -609,7 +1854,7 @@ function TopBarQueueButton() {
       className={`flex h-12 min-w-[144px] items-center justify-center gap-4 rounded-[10px] px-5 text-[14px] font-medium ${topBarSurface()}`}
     >
       <TopBarPlay />
-      <span>Queue</span>
+      <span>队列</span>
       <TopBarChevron dir="down" className="text-white/48" />
     </button>
   );
@@ -749,7 +1994,7 @@ function QueueButton() {
       <svg width="11" height="11" viewBox="0 0 11 11" className="text-white/95">
         <path d="M 2 1.5 L 9.5 5.5 L 2 9.5 Z" fill="currentColor" />
       </svg>
-      <span>Queue</span>
+      <span>队列</span>
       <Chevron dir="down" className="text-white/45" />
     </button>
   );
@@ -913,21 +2158,21 @@ function PromptNode({
           <div className="flex items-center gap-2.5">
             <StatusDot selected={selected} />
             <span className="text-[15px] font-medium tracking-tight text-white/95">
-              Prompt
+              提示词
             </span>
           </div>
 
           <button className="flex items-center gap-1.5 rounded-full bg-[#7CE38B] px-3 py-1.5 text-[12px] font-medium text-canvas hover:brightness-105">
             <SparkleIcon />
-            Generate
+            生成
           </button>
         </div>
 
         <PromptSection
-          label="Positive"
+          label="正向"
           color={C.positive}
           currentText="A black bear with a pink snout, minimalist style, soft gradients, clear blue sky"
-          placeholder="Type what you want to get"
+          placeholder="输入你想要的画面内容"
           className="flex-1"
         />
       </div>
@@ -960,21 +2205,21 @@ function NegativePromptNode({
           <div className="flex items-center gap-2.5">
             <StatusDot selected={selected} />
             <span className="text-[15px] font-medium tracking-tight text-white/95">
-              Negative
+              负面
             </span>
           </div>
 
           <button className="flex items-center gap-1.5 rounded-full bg-[#FF7E87] px-3 py-1.5 text-[12px] font-medium text-canvas hover:brightness-105">
             <SparkleIcon />
-            Generate
+            生成
           </button>
         </div>
 
         <PromptSection
-          label="Negative"
+          label="负面"
           color={C.negative}
           currentText="No text, unnecessary details, background objects, other animals or people."
-          placeholder="Type what do not you want to get"
+          placeholder="输入你不想要的内容"
           className="flex-1"
         />
       </div>
@@ -1089,7 +2334,7 @@ function ImageGenNode({
         <div className="flex shrink-0 items-center gap-2.5 pb-2">
           <StatusDot selected={selected} />
           <span className="text-[15px] font-medium tracking-tight text-white/95">
-            Image Generator
+            图像生成器
           </span>
         </div>
 
@@ -1101,22 +2346,22 @@ function ImageGenNode({
           {/* 端口区 */}
           <div className="flex items-start justify-between">
             <div className="space-y-1.5">
-              <PortLabelRow label="model" color={C.model} side="left" />
-              <PortLabelRow label="positive" color={C.positive} side="left" />
-              <PortLabelRow label="negative" color={C.negative} side="left" />
+              <PortLabelRow label="模型" color={C.model} side="left" />
+              <PortLabelRow label="正向" color={C.positive} side="left" />
+              <PortLabelRow label="负面" color={C.negative} side="left" />
             </div>
-            <PortLabelRow label="image" color={C.image} side="right" />
+            <PortLabelRow label="图像" color={C.image} side="right" />
           </div>
 
           {/* 参数列表 */}
           <div className="mt-5 space-y-2.5">
-            <ParamRow label="Randomness" value="12345" />
-            <ParamRow label="Control mode" value="Fixed" />
-            <ParamRow label="Quality steps">
+            <ParamRow label="随机种子" value="12345" />
+            <ParamRow label="控制模式" value="固定" />
+            <ParamRow label="质量步数">
               <StepperControl value={30} />
             </ParamRow>
-            <ParamRow label="Prompt strength" value="8.0" />
-            <ParamRow label="Sampling method" value="dpm++ 2M" />
+            <ParamRow label="提示词强度" value="8.0" />
+            <ParamRow label="采样方法" value="dpm++ 2M" />
           </div>
         </div>
       </div>
@@ -1248,7 +2493,7 @@ function PreviewNode({
         <div className="flex shrink-0 items-center gap-2.5 pb-2">
           <StatusDot selected={selected} />
           <span className="text-[15px] font-medium tracking-tight text-white/95">
-            Preview Image
+            预览图像
           </span>
         </div>
 
@@ -1279,7 +2524,7 @@ function PreviewNode({
             {/* 文字叠加：Final Result + 描述 */}
             <div className="absolute inset-x-0 bottom-0 p-4">
               <h3 className="text-[17px] font-medium tracking-tight text-white drop-shadow-sm">
-                Final Result
+                最终结果
               </h3>
               <p className="mt-1.5 text-[11.5px] leading-relaxed text-white/80">
                 Minimalist illustration of a black bear with a pink snout, soft
@@ -1359,7 +2604,7 @@ function AddNodeMenu({
       style={{ left, top, background: "rgba(28, 28, 32, 0.92)" }}
     >
       <div className="px-2.5 pb-1.5 pt-1 text-[10px] uppercase tracking-wider text-white/40">
-        Add node
+        添加节点
       </div>
       {NODE_TYPE_LIST.map((item) => (
         <button
@@ -1520,7 +2765,7 @@ function ModelNode({
         <div className="flex shrink-0 items-center gap-2.5 pb-2">
           <StatusDot selected={selected} />
           <span className="text-[15px] font-medium tracking-tight text-white/95">
-            Model
+            模型
           </span>
         </div>
 
@@ -1530,9 +2775,9 @@ function ModelNode({
           style={{ background: "#1e1e22" }}
         >
           <div className="ml-auto w-max space-y-1.5 text-right">
-            <InsetPortRow label="model" color={C.model} />
-            <InsetPortRow label="positive" color={C.positive} />
-            <InsetPortRow label="negative" color={C.negative} />
+            <InsetPortRow label="模型" color={C.model} />
+            <InsetPortRow label="正向" color={C.positive} />
+            <InsetPortRow label="负面" color={C.negative} />
           </div>
 
           {/* Dropdown 子卡 */}

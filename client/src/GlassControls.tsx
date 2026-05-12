@@ -112,7 +112,7 @@ export function GlassControls({
           className="fixed left-3 top-1/2 z-40 flex -translate-y-1/2 items-center gap-2 rounded-full border border-white/[0.06] bg-[#1e1e22]/95 px-4 py-2.5 text-[12px] font-medium text-white/85 shadow-[0_8px_24px_rgba(0,0,0,0.45)] backdrop-blur-md hover:bg-[#26262a] hover:text-white"
         >
           <GearIcon />
-          <span>Glass</span>
+          <span>玻璃</span>
         </button>
       )}
 
@@ -128,13 +128,13 @@ export function GlassControls({
         {/* 标题栏 */}
         <header className="flex items-center gap-2 px-4 pb-3 pt-4">
           <GearIcon />
-          <span className="text-[13px] font-medium text-white/95">Liquid Glass</span>
+          <span className="text-[13px] font-medium text-white/95">液态玻璃</span>
           <button
             onClick={() => onChange({ ...DEFAULT_GLASS_PARAMS })}
             className="ml-auto rounded-full border border-white/[0.06] bg-[#26262a] px-2.5 py-1 text-[10px] font-medium text-white/70 hover:bg-[#2c2c32] hover:text-white"
             title="重置为默认值"
           >
-            Reset
+            重置
           </button>
           <button
             onClick={() => setOpen(false)}

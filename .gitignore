@@ -9,6 +9,12 @@ __pycache__/
 venv/
 .env
 
+# 本地 ML 权重（39MB+，运行时按需下载，不入库）
+server/models/
+
+# 本地构建/生成产物（PSD、切层图等）
+outputs/
+
 .DS_Store
 .idea/
 .vscode/
