@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 # gpt-image-2 字段取值约束
 QualityT = Literal["auto", "low", "medium", "high"]
@@ -28,6 +29,7 @@ class GenerateRequest(BaseModel):
     output_format: OutputFormatT = "png"
     output_compression: int | None = Field(default=None, ge=0, le=100)
     moderation: ModerationT = "auto"
+    reasoning: bool = Field(default=False, description="是否启用思考模式（gpt-image-2 reasoning）")
 
     @field_validator("size")
     @classmethod
@@ -88,3 +90,50 @@ class SegmentRequest(BaseModel):
     w: float = Field(..., ge=16)
     h: float = Field(..., ge=16)
     padding_factor: float = Field(default=1.0, ge=0, le=3)
+
+
+# ===== auth-foundation =====
+
+UserRoleT = Literal["admin", "user", "paid"]
+
+# 至少含一个字母 + 一个数字；长度由 Pydantic 字段约束
+_PASSWORD_LETTER = re.compile(r"[A-Za-z]")
+_PASSWORD_DIGIT = re.compile(r"\d")
+
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=8, max_length=72)
+    nickname: str | None = Field(default=None, min_length=1, max_length=32)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        if not _PASSWORD_LETTER.search(v) or not _PASSWORD_DIGIT.search(v):
+            raise ValueError("密码须同时包含字母与数字")
+        return v
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=1, max_length=200)
+
+
+class UserPublic(BaseModel):
+    """对外暴露的用户视图（不含 password_hash）"""
+
+    id: int
+    email: str
+    nickname: str
+    role: UserRoleT
+    avatar_url: str | None = None
+    credits: int
+    last_login_at: datetime | None = None
+    created_at: datetime
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: Literal["Bearer"] = "Bearer"
+    expires_in: int  # 秒
+    user: UserPublic

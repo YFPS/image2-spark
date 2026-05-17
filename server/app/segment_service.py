@@ -140,6 +140,104 @@ def _keep_components_touching_rect(
     return np.where(keep, alpha, 0).astype(np.uint8)
 
 
+def segment_brush_mobile_sam(
+    img_bytes: bytes,
+    brush_mask_bytes: bytes,
+) -> bytes:
+    """笔刷 mask → MobileSAM 精细抠图（保留原图尺寸，便于前端 PSD 分层叠加）。
+
+    输入：
+      - img_bytes: 原图 PNG/JPEG bytes
+      - brush_mask_bytes: 用户笔刷蒙版 PNG。约定：alpha > 0 = 用户涂抹区域。
+
+    流程（核心是把 brush mask 转 SAM 三路 prompt 一起喂）：
+      1. brush mask 转灰度二值
+      2. 算紧凑 bbox（带 padding）→ SAM box prompt
+      3. 在涂抹区内均匀采样正点 → SAM point prompt（增强主体定位）
+      4. brush mask 缩到 256×256 作为 SAM mask_input（低分辨率 mask prompt）
+      5. SAM 推理 multimask_output=True，选 score 最高的
+      6. 对最终 alpha 做轻微 Gaussian feather（1px）抗锯齿
+
+    返回：与原图同尺寸的 RGBA PNG，alpha 是 SAM 精细 mask。
+    前端拿到后直接覆盖在原图上即可形成 PSD 分层效果。
+    """
+    img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    arr = np.array(img_pil)
+    H, W = arr.shape[:2]
+
+    # 1) 读 brush mask，缩放到原图尺寸（前端 canvas 已是原图 natural 尺寸，但兜底）
+    bm_pil = Image.open(io.BytesIO(brush_mask_bytes))
+    if bm_pil.size != (W, H):
+        bm_pil = bm_pil.resize((W, H), Image.BILINEAR)
+    if bm_pil.mode != "RGBA":
+        bm_pil = bm_pil.convert("RGBA")
+    bm_alpha = np.array(bm_pil.split()[-1])  # 取 alpha 通道
+    brush_bin = (bm_alpha > 8).astype(np.uint8)  # 二值化
+
+    if brush_bin.sum() < 16:
+        raise ValueError("笔刷区域过小，请多涂一些")
+
+    # 2) bbox prompt
+    rows = np.where(brush_bin.any(axis=1))[0]
+    cols = np.where(brush_bin.any(axis=0))[0]
+    by0, by1 = int(rows[0]), int(rows[-1])
+    bx0, bx1 = int(cols[0]), int(cols[-1])
+    # 给 SAM 一点 padding，让模型有空间扩主体
+    pad = max(8, int(max(by1 - by0, bx1 - bx0) * 0.08))
+    bx0 = max(0, bx0 - pad)
+    by0 = max(0, by0 - pad)
+    bx1 = min(W - 1, bx1 + pad)
+    by1 = min(H - 1, by1 + pad)
+    box = np.array([bx0, by0, bx1, by1], dtype=np.float32)
+
+    # 3) 在涂抹区内均匀采样正点（最多 8 个，按面积分布）
+    ys, xs = np.where(brush_bin > 0)
+    n_pts = min(8, max(3, ys.size // 5000))
+    if ys.size > 0:
+        idx = np.linspace(0, ys.size - 1, n_pts).astype(int)
+        point_coords = np.stack([xs[idx], ys[idx]], axis=1).astype(np.float32)
+        point_labels = np.ones(n_pts, dtype=np.int32)
+    else:
+        point_coords = None
+        point_labels = None
+
+    # 4) mask_input：SAM 要求 (1, 256, 256) 的 logit 形式低分辨率 mask
+    mask_input_lr = cv2.resize(brush_bin.astype(np.float32), (256, 256), interpolation=cv2.INTER_LINEAR)
+    # SAM 期望未归一化的 logit；用 +/-16 经验值
+    mask_input_lr = (mask_input_lr * 32.0 - 16.0).astype(np.float32)
+    mask_input = mask_input_lr[None, :, :]
+
+    # 5) SAM 推理
+    predictor = get_mobile_sam_predictor()
+    predictor.set_image(arr)
+    masks, scores, _logits = predictor.predict(
+        point_coords=point_coords,
+        point_labels=point_labels,
+        box=box,
+        mask_input=mask_input,
+        multimask_output=True,
+    )
+    masks = np.asarray(masks)
+    if masks.size == 0:
+        raise RuntimeError("SAM 未返回 mask")
+    if masks.ndim == 2:
+        masks = masks[np.newaxis, :, :]
+    scores_arr = np.asarray(scores)
+    best_idx = int(np.argmax(scores_arr)) if scores_arr.size == masks.shape[0] else 0
+    alpha = (masks[best_idx].astype(np.uint8)) * 255
+    alpha = _fill_inner_holes(alpha)
+
+    # 6) 1px Gaussian feather 抗锯齿
+    alpha = cv2.GaussianBlur(alpha, (3, 3), 0.6)
+
+    # 7) 输出与原图同尺寸的 RGBA PNG（不裁切，便于前端原位叠加）
+    rgba = np.dstack([arr, alpha])
+    out = Image.fromarray(rgba, mode="RGBA")
+    buf = io.BytesIO()
+    out.save(buf, format="PNG", optimize=False)
+    return buf.getvalue()
+
+
 def segment_grabcut(
     img_bytes: bytes,
     x: float,

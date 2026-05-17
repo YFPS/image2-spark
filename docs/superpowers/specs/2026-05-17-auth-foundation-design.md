@@ -364,8 +364,8 @@ email-validator>=2.0
 
 环境：
 
-- DB → 阿里云 RDS 的 `image2_test`，每用例 setUp `TRUNCATE users, credit_transactions`
-- Redis → NAS 实例 DB 15（`redis://192.168.50.250:6380/15`），setUp `FLUSHDB`
+- DB → 与开发共用 `image2` 库（用户决定不另建 test 库）。**为避免污染**：每个测试用例使用随机邮箱（`f"test-{uuid4().hex[:12]}@example.com"`），测试 tearDown 按邮箱删除自己创建的 user + 关联流水。不做全表 TRUNCATE。
+- Redis → NAS 实例 DB 15（`redis://192.168.50.250:6380/15`，与开发的 DB 0 隔离），setUp `FLUSHDB`
 - 通过 `server/.env.test` + `os.environ` 注入
 
 用例：

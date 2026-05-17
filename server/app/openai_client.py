@@ -67,11 +67,12 @@ async def call_images_generate(payload: dict[str, Any]) -> dict[str, Any]:
 
 async def call_images_edit(
     fields: dict[str, Any],
-    files: dict[str, tuple[str, bytes, str]],
+    files: dict[str, tuple[str, bytes, str]] | list[tuple[str, tuple[str, bytes, str]]],
 ) -> dict[str, Any]:
     """调上游 /images/edits（multipart），返回解析后的 JSON。
 
-    files 形如：{"image": ("image.png", bytes, "image/png"), "mask": (...)}
+    files 既可是 dict（单图：{"image": ("image.png", bytes, "image/png"), "mask": (...)}），
+    也可是 list[(name, (filename, bytes, content_type))]（多图：同名多段，name 用 "image[]"）。
     fields 是其他文本字段。
     """
     settings = get_settings()

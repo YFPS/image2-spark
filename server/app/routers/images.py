@@ -25,7 +25,7 @@ from ..schemas import (
     GenerateUsage,
     SegmentRequest,
 )
-from ..segment_service import fetch_image_bytes, segment_sync
+from ..segment_service import fetch_image_bytes, segment_brush_mobile_sam, segment_sync
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/images", tags=["images"])
@@ -56,7 +56,7 @@ async def generate(req: GenerateRequest) -> JSONResponse:
     override = (
         settings.upstream_model_override_4k if is_4k else settings.upstream_model_override
     )
-    upstream_model = override or req.model
+    upstream_model = override or "gpt-image-2"
 
     # 组装上游 payload（OpenAI 字段名）
     payload: dict = {
@@ -69,6 +69,8 @@ async def generate(req: GenerateRequest) -> JSONResponse:
         "output_format": req.output_format,
         "moderation": req.moderation,
     }
+    if req.reasoning:
+        payload["reasoning"] = True
     if req.output_format in {"jpeg", "webp"} and req.output_compression is not None:
         payload["output_compression"] = req.output_compression
 
@@ -227,6 +229,44 @@ async def segment(req: SegmentRequest) -> Response:
     return Response(content=png_bytes, media_type="image/png")
 
 
+@router.post("/brush-cutout")
+async def brush_cutout(
+    image: UploadFile = File(..., description="原图（PNG/JPEG）"),
+    mask: UploadFile = File(..., description="笔刷蒙版 PNG，alpha>0 = 用户涂抹"),
+    subject_type: str = Form("auto", description="auto|object|text（暂未启用 text 专精）"),
+) -> Response:
+    """笔刷 mask → 精细抠图（MobileSAM 三路 prompt：bbox + 点 + 低分 mask）。
+
+    返回：与原图同尺寸的 RGBA PNG，alpha 通道是 SAM 精细 mask；
+    前端可直接覆盖在原图上形成 PSD 分层效果（位置不偏移）。
+    """
+    _ = subject_type  # 预留：将来按 text 路由到 Hi-SAM
+    image_bytes = await image.read()
+    mask_bytes = await mask.read()
+    if not image_bytes or not mask_bytes:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "validation_error", "message": "image 或 mask 为空"}},
+        )
+
+    try:
+        png_bytes = await asyncio.to_thread(
+            segment_brush_mobile_sam, image_bytes, mask_bytes
+        )
+    except ValueError as e:
+        return JSONResponse(
+            status_code=422,
+            content={"error": {"code": "validation_error", "message": str(e)}},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.exception("brush-cutout 失败")
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"code": "model_error", "message": f"抠图失败：{e}"}},
+        )
+    return Response(content=png_bytes, media_type="image/png")
+
+
 @router.post(
     "/edit",
     response_model=GenerateResponse,
@@ -237,16 +277,18 @@ async def segment(req: SegmentRequest) -> Response:
     },
 )
 async def edit(
-    image: UploadFile = File(..., description="源图（PNG/WebP），与 mask 同尺寸"),
-    mask: UploadFile = File(..., description="mask PNG，alpha=0 区域将被 AI 重画"),
+    image: list[UploadFile] = File(..., description="参考图（1~N 张）；mask 仅对齐第 1 张"),
+    mask: UploadFile = File(..., description="mask PNG，alpha=0 区域将被 AI 重画（对齐 image[0]）"),
     prompt: str = Form(..., min_length=1),
     model: str = Form("gpt-image-2"),
     size: str = Form("auto"),
     quality: str = Form("low"),
     n: int = Form(1),
+    background: str = Form("auto"),
 ) -> JSONResponse:
-    """Inpainting 编辑：image + mask + prompt → 上游 /v1/images/edits → 新图。
+    """Inpainting / 多参考图编辑：image[] + mask + prompt → 上游 /v1/images/edits → 新图。
 
+    上游 OpenAI 协议支持多张参考图（字段名 image[] 或多次 image=）；mask 仅对齐第 1 张。
     复用 generate 路由的模型映射策略（按 size 自动选 vip / vip-4k）。
     """
     # 1) 字符映射：UI 用 ×，API 要 x
@@ -268,12 +310,27 @@ async def edit(
     upstream_model = override or model
 
     # 3) 读 multipart 字节
-    image_bytes = await image.read()
-    mask_bytes = await mask.read()
-    if not image_bytes or not mask_bytes:
+    if not image:
         return JSONResponse(
             status_code=400,
-            content={"error": {"code": "validation_error", "message": "image 或 mask 为空"}},
+            content={"error": {"code": "validation_error", "message": "至少需要 1 张参考图"}},
+        )
+    image_payloads: list[tuple[str, bytes, str]] = []
+    for idx, up in enumerate(image):
+        b = await up.read()
+        if not b:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "validation_error", "message": f"image[{idx}] 为空"}},
+            )
+        image_payloads.append(
+            (up.filename or f"image-{idx}.png", b, up.content_type or "image/png")
+        )
+    mask_bytes = await mask.read()
+    if not mask_bytes:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "validation_error", "message": "mask 为空"}},
         )
 
     # 4) 转发到上游
@@ -283,11 +340,16 @@ async def edit(
         "size": api_size,
         "quality": quality,
         "n": str(n),
+        "background": background,
     }
-    files = {
-        "image": (image.filename or "image.png", image_bytes, image.content_type or "image/png"),
-        "mask": (mask.filename or "mask.png", mask_bytes, mask.content_type or "image/png"),
-    }
+    # httpx 接受 list[(name, (filename, bytes, content_type))] 来发同名多段
+    files: list[tuple[str, tuple[str, bytes, str]]] = [
+        ("image[]", p) for p in image_payloads
+    ]
+    files.append((
+        "mask",
+        ("mask.png", mask_bytes, "image/png"),
+    ))
 
     try:
         upstream_json = await call_images_edit(fields, files)

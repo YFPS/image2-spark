@@ -1,4 +1,5 @@
 """从 .env 加载配置；统一配置入口"""
+# 触发 reload pick up .env 改动 v2
 from __future__ import annotations
 
 import os
@@ -46,6 +47,22 @@ class Settings:
         self.mobile_sam_device: str = (
             os.getenv("MOBILE_SAM_DEVICE", "auto").strip().lower() or "auto"
         )
+
+        # ===== auth-foundation =====
+        # MySQL 异步连接串：mysql+asyncmy://user:pass@host:3306/image2?charset=utf8mb4
+        self.database_url: str = os.getenv("DATABASE_URL", "").strip()
+        # Redis 连接串：redis://host:port/db
+        self.redis_url: str = os.getenv("REDIS_URL", "").strip()
+        # JWT 签名密钥（HS256），必填，建议 64 字符以上随机串
+        self.jwt_secret: str = os.getenv("JWT_SECRET", "").strip()
+        self.jwt_exp_days: int = int(os.getenv("JWT_EXP_DAYS", "7"))
+        self.bcrypt_rounds: int = int(os.getenv("BCRYPT_ROUNDS", "12"))
+        # 新用户注册赠送积分（1 积分 ≈ 1 张普通生图，扣费规则下期定）
+        self.signup_bonus_credits: int = int(os.getenv("SIGNUP_BONUS_CREDITS", "5"))
+        # 登录失败限流
+        self.login_fail_max: int = int(os.getenv("LOGIN_FAIL_MAX", "5"))
+        self.login_fail_window: int = int(os.getenv("LOGIN_FAIL_WINDOW", "300"))
+        self.login_lock_ttl: int = int(os.getenv("LOGIN_LOCK_TTL", "900"))
 
         if not self.openai_api_key:
             # 不直接 raise，让健康检查仍可访问；调用时再报错
