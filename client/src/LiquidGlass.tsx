@@ -94,6 +94,17 @@ export function LiquidGlass({
     let cachedBlurRadius = -1;
     let cachedBlurWeights: number[] = [];
 
+    // 动效时基：从 effect 启动起计时
+    const startedAt = performance.now();
+
+    // 系统偏好：减弱动效 → motionScale = 0
+    const reducedMotionMQ = window.matchMedia("(prefers-reduced-motion: reduce)");
+    let motionScale = reducedMotionMQ.matches ? 0 : 1;
+    const onReduceMotionChange = (e: MediaQueryListEvent) => {
+      motionScale = e.matches ? 0 : 1;
+    };
+    reducedMotionMQ.addEventListener("change", onReduceMotionChange);
+
     let raf: number | null = null;
     const render = () => {
       raf = requestAnimationFrame(render);
@@ -135,6 +146,8 @@ export function LiquidGlass({
         u_shapeCenters: centersFlat,
         u_shapeSizes: sizesFlat,
         u_shapeRadii: radiiFlat,
+        u_time: (performance.now() - startedAt) / 1000,
+        u_motionScale: motionScale,
       });
 
       renderer.render({
@@ -178,6 +191,7 @@ export function LiquidGlass({
     return () => {
       window.removeEventListener("resize", onResize);
       window.removeEventListener("mousemove", onMouseMove);
+      reducedMotionMQ.removeEventListener("change", onReduceMotionChange);
       if (raf) cancelAnimationFrame(raf);
       renderer.dispose();
     };

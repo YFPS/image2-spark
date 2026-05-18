@@ -13,6 +13,8 @@ out vec4 fragColor;
 uniform vec2 u_resolution;
 uniform float u_dpr;
 uniform vec2 u_mouse;             // 实际鼠标位置（GLSL 像素坐标）
+uniform float u_time;             // 秒，单调递增，从渲染器启动开始计时
+uniform float u_motionScale;      // 0..1，prefers-reduced-motion 时为 0，否则 1
 uniform float u_shapeRoundness;
 uniform float u_shadowExpand;
 uniform float u_shadowFactor;
@@ -115,6 +117,12 @@ void main() {
   vec2 shadowSamplePos = gl_FragCoord.xy - vec2(u_shadowPosition.x * u_dpr, u_shadowPosition.y * u_dpr);
   float merged = mainSDF(shadowSamplePos);
   float shadow = exp(-1.0 / u_shadowExpand * abs(merged) * u_resolution1x.y) * 0.6 * u_shadowFactor;
+
+  // === TEMP wiring 验证：整屏亮度做 1Hz 呼吸 ===
+  // sin(t*2π) 周期 1s，振幅 ±2%；u_motionScale=0 时归零
+  float breathe = sin(u_time * 6.2831853) * 0.02 * u_motionScale;
+  bgColor += vec3(breathe);
+  // === TEMP end ===
 
   fragColor = vec4(bgColor - vec3(shadow), 1.0);
 }
