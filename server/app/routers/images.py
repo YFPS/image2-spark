@@ -42,21 +42,7 @@ router = APIRouter(prefix="/api/images", tags=["images"])
 )
 async def generate(req: GenerateRequest) -> JSONResponse:
     """文本生图代理"""
-    # 中转商若有变体名（gpt-image-2-vip / -vip-4k 等），后端按 size 路由：
-    #   边长 > 2048 → 走 4K 模型；否则走快速基础模型
-    settings = get_settings()
-    is_4k = False
-    if req.size != "auto":
-        try:
-            w_str, h_str = req.size.split("x")
-            if max(int(w_str), int(h_str)) > 2048:
-                is_4k = True
-        except ValueError:
-            pass
-    override = (
-        settings.upstream_model_override_4k if is_4k else settings.upstream_model_override
-    )
-    upstream_model = override or "gpt-image-2"
+    upstream_model = "gpt-image-2"
 
     # 组装上游 payload（OpenAI 字段名）
     payload: dict = {
@@ -289,25 +275,11 @@ async def edit(
     """Inpainting / 多参考图编辑：image[] + mask + prompt → 上游 /v1/images/edits → 新图。
 
     上游 OpenAI 协议支持多张参考图（字段名 image[] 或多次 image=）；mask 仅对齐第 1 张。
-    复用 generate 路由的模型映射策略（按 size 自动选 vip / vip-4k）。
     """
     # 1) 字符映射：UI 用 ×，API 要 x
     api_size = size.replace("×", "x")
 
-    # 2) 模型 override（与 generate 一致）
-    settings = get_settings()
-    is_4k = False
-    if api_size != "auto":
-        try:
-            w_str, h_str = api_size.split("x")
-            if max(int(w_str), int(h_str)) > 2048:
-                is_4k = True
-        except ValueError:
-            pass
-    override = (
-        settings.upstream_model_override_4k if is_4k else settings.upstream_model_override
-    )
-    upstream_model = override or model
+    upstream_model = "gpt-image-2"
 
     # 3) 读 multipart 字节
     if not image:

@@ -32,6 +32,7 @@ import {
 import { StickerCropperModal, ScissorsIcon } from "./components/StickerCropperModal";
 import { MaskBrushModal } from "./components/MaskBrushModal";
 import { AiCutoutModal } from "./components/AiCutoutModal";
+import ModelPlaza from "./ModelPlaza";
 import { useAuth } from "./auth/AuthContext";
 
 // 角色 → 侧边栏副标显示
@@ -512,145 +513,6 @@ function anchor(pos: Point, node: NodeDef, portId: string) {
   return { x, y, color: port.color };
 }
 
-/* 模型选择卡片 */
-const MODELS = [
-  {
-    id: "gpt-image-2" as const,
-    name: "GPT-Image2",
-    creditsPerImage: 5,
-    description: "OpenAI 最新图像生成模型，擅长理解复杂提示词、生成高质量、高细节的画面。支持修改（Inpainting）、思考模式（Reasoning）等高级功能。",
-    features: ["高细节生成", "Inpainting 修改", "思考模式", "多尺寸支持"],
-    badge: "旗舰",
-    badgeColor: "#F0FE2D",
-  },
-  {
-    id: "banana-nano-pro" as const,
-    name: "Banana Nano Pro",
-    creditsPerImage: 3,
-    description: "轻量级图像生成模型，生成速度快、性价比高。适合批量出图、快速迭代创意、低预算场景。",
-    features: ["高速生成", "性价比高", "批量出图", "低功耗"],
-    badge: "经济",
-    badgeColor: "#7CE38B",
-  },
-];
-
-function ModelPageView({
-  selectedModel,
-  onModelChange,
-  credits,
-  onStartGenerate,
-}: {
-  selectedModel: "gpt-image-2" | "banana-nano-pro";
-  onModelChange: (m: "gpt-image-2" | "banana-nano-pro") => void;
-  credits: number;
-  onStartGenerate?: () => void;
-}) {
-  return (
-    <div className="flex min-w-0 flex-1 flex-col gap-4 px-1">
-      <div className="flex shrink-0 items-center justify-between">
-        <div className="flex items-center gap-3">
-          <StatusDot selected />
-          <h1 className="text-[22px] font-medium leading-tight text-white/95">模型</h1>
-          <span className="text-[12px] text-white/45">选择要使用的图像生成模型</span>
-        </div>
-        <div className="flex items-center gap-2 rounded-full bg-white/[0.04] px-4 py-1.5">
-          <span className="text-[12px] text-white/45">可用积分</span>
-          <span className="text-[15px] font-semibold text-accent-foxo">{credits}</span>
-        </div>
-      </div>
-
-      <div className="grid min-h-0 flex-1 grid-cols-2 gap-4">
-        {MODELS.map((m) => {
-          const active = selectedModel === m.id;
-          return (
-            <button
-              key={m.id}
-              onClick={() => onModelChange(m.id)}
-              className={`relative flex flex-col rounded-[28px] p-6 text-left transition-all duration-200 ${
-                active
-                  ? "ring-2 ring-accent-foxo ring-offset-2 ring-offset-[#0D0D0D]"
-                  : "hover:ring-1 hover:ring-white/20"
-              }`}
-            >
-              {/* 状态点 + 徽章 */}
-              <div className="mb-4 flex items-center justify-between">
-                <StatusDot selected={active} />
-                <span
-                  className="rounded-full px-3 py-1 text-[11px] font-semibold"
-                  style={{
-                    backgroundColor: `${m.badgeColor}18`,
-                    color: m.badgeColor,
-                  }}
-                >
-                  {m.badge}
-                </span>
-              </div>
-
-              {/* 模型名 */}
-              <h2 className="text-[20px] font-semibold text-white/95">{m.name}</h2>
-
-              {/* 积分/张 */}
-              <div className="mt-2 flex items-baseline gap-1.5">
-                <span className="text-[32px] font-bold text-accent-foxo">{m.creditsPerImage}</span>
-                <span className="text-[13px] text-white/50">积分 / 张</span>
-              </div>
-
-              {/* 分割线 */}
-              <div className="my-4 h-px bg-white/[0.06]" />
-
-              {/* 描述 */}
-              <p className="text-[12.5px] leading-relaxed text-white/60">{m.description}</p>
-
-              {/* 特性列表 */}
-              <div className="mt-4 flex flex-wrap gap-2">
-                {m.features.map((f) => (
-                  <span
-                    key={f}
-                    className="rounded-full bg-white/[0.04] px-3 py-1 text-[11px] text-white/55"
-                  >
-                    {f}
-                  </span>
-                ))}
-              </div>
-
-              {/* 选中标记 */}
-              {active && (
-                <div className="absolute right-5 top-5 grid h-6 w-6 place-items-center rounded-full bg-accent-foxo text-[12px] font-bold text-[#0D0D0D]">
-                  ✓
-                </div>
-              )}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* 底部提示 */}
-      <div className="flex shrink-0 items-center justify-between rounded-[20px] border border-white/[0.04] bg-[#1e1e22] px-5 py-3">
-        <div className="flex items-center gap-3 text-[12px] text-white/55">
-          <span className="grid h-8 w-8 place-items-center rounded-full bg-accent-foxo/12 text-accent-foxo">✦</span>
-          <span>
-            当前模型：
-            <strong className="text-white/85">
-              {MODELS.find((m) => m.id === selectedModel)?.name}
-            </strong>
-            ，每张消耗
-            <strong className="text-accent-foxo">
-              {" "}{MODELS.find((m) => m.id === selectedModel)?.creditsPerImage}{" "}
-            </strong>
-            积分
-          </span>
-        </div>
-        <button
-          onClick={onStartGenerate}
-          className="rounded-full bg-accent-foxo px-5 py-2 text-[12px] font-semibold text-[#0D0D0D]"
-        >
-          开始生成
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function SimpleGenerateView({
   onShapesChange,
 }: {
@@ -667,7 +529,8 @@ function SimpleGenerateView({
 
   const [activeNav, setActiveNav] = useState("studio");
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
-  const [selectedModel, setSelectedModel] = useState<"gpt-image-2" | "banana-nano-pro">("gpt-image-2");
+  // ModelPlaza 内部自管选型；这里只读 selectedModel 用于顶部副标显示
+  const [selectedModel] = useState<"gpt-image-2" | "banana-nano-pro">("gpt-image-2");
   const [chatInput, setChatInput] = useState("");
 
   // 出图状态
@@ -1080,12 +943,7 @@ function SimpleGenerateView({
         </aside>
 
         {activeNav === "models" ? (
-          <ModelPageView
-            selectedModel={selectedModel}
-            onModelChange={setSelectedModel}
-            credits={user?.credits ?? 0}
-            onStartGenerate={() => setActiveNav("studio")}
-          />
+          <ModelPlaza />
         ) : (
         <div className="flex min-w-0 flex-1 flex-col gap-3">
           {/* 顶部标题（贴外、不进卡） */}
@@ -1204,7 +1062,7 @@ function SimpleGenerateView({
                         key={item.id}
                         title="点击放大预览"
                         onClick={() => setPreviewSrc(item.dataURL)}
-                        className="group/thumb relative h-[72px] w-[54px] shrink-0 cursor-zoom-in overflow-hidden rounded-[10px] border border-white/[0.10] bg-[#141418] shadow-[0_10px_24px_rgba(0,0,0,0.34)] transition-[border-color,box-shadow] duration-200 ease-out -skew-x-12 hover:border-accent-foxo/60 hover:shadow-[0_10px_22px_-6px_rgba(247,200,11,0.55),inset_0_0_0_1px_rgba(247,200,11,0.38)]"
+                        className="group/thumb relative h-[72px] w-[54px] shrink-0 cursor-zoom-in overflow-hidden rounded-[10px] border border-white/[0.14] bg-[#141418] shadow-[0_14px_28px_-6px_rgba(0,0,0,0.55),0_4px_10px_rgba(0,0,0,0.38),inset_0_0_0_1px_rgba(255,255,255,0.08)] transition-[border-color,box-shadow,transform] duration-200 ease-out -skew-x-12 hover:-translate-y-0.5 hover:border-accent-foxo/60 hover:shadow-[0_16px_30px_-4px_rgba(247,200,11,0.45),0_4px_10px_rgba(0,0,0,0.4),inset_0_0_0_1px_rgba(247,200,11,0.42)]"
                       >
                         <img
                           src={item.dataURL}
@@ -1212,6 +1070,13 @@ function SimpleGenerateView({
                           className="h-full w-full object-cover skew-x-12 scale-125"
                           draggable={false}
                         />
+                        {/* 玻璃膜：斜向高光 + 顶部亮边 + 左侧亮边 + 底部暗化 */}
+                        <div className="pointer-events-none absolute inset-0 rounded-[10px]">
+                          <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.34)_0%,rgba(255,255,255,0.10)_26%,rgba(255,255,255,0.02)_50%,transparent_62%)]" />
+                          <div className="absolute inset-x-0 bottom-0 h-1/3 bg-gradient-to-t from-black/35 to-transparent" />
+                          <div className="absolute inset-x-1.5 top-0 h-px bg-gradient-to-r from-transparent via-white/55 to-transparent" />
+                          <div className="absolute inset-y-1.5 left-0 w-px bg-gradient-to-b from-white/45 via-white/10 to-transparent" />
+                        </div>
                       </div>
                     ))}
                     {refImages.length < REF_MAX && foldedRefImages.length > 0 && (

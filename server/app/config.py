@@ -20,12 +20,6 @@ class Settings:
             "OPENAI_BASE_URL", "https://api.openai.com/v1"
         ).rstrip("/")
         self.openai_timeout: float = float(os.getenv("OPENAI_TIMEOUT", "120"))
-        # 中转商若用变体模型名，可在此覆盖；留空时透传前端值
-        self.upstream_model_override: str = os.getenv("UPSTREAM_MODEL_OVERRIDE", "").strip()
-        # 4K 边长请求时使用的变体；留空则复用 override
-        self.upstream_model_override_4k: str = os.getenv(
-            "UPSTREAM_MODEL_OVERRIDE_4K", ""
-        ).strip() or self.upstream_model_override
         # 抠图模型（rembg，仅 SEGMENT_BACKEND=rembg 时生效）
         self.rembg_model: str = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
         # 抠图后端：grabcut（默认，复杂海报场景表现好）/ rembg（v1，简单贴纸场景）
