@@ -22,7 +22,6 @@ export function AiCutoutModal({
   const imgRef = useRef<HTMLImageElement | null>(null);
   const displayRef = useRef<HTMLCanvasElement | null>(null);
 
-  const [imgLoaded, setImgLoaded] = useState(false);
   const [imgError, setImgError] = useState<string | null>(null);
   const [tool, setTool] = useState<"brush" | "eraser">("brush");
   const [brushSize, setBrushSize] = useState(60);
@@ -46,7 +45,6 @@ export function AiCutoutModal({
     if (!img || !cv) return;
     cv.width = img.naturalWidth;
     cv.height = img.naturalHeight;
-    setImgLoaded(true);
   }, []);
 
   useEffect(() => {

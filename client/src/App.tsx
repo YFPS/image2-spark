@@ -34,6 +34,8 @@ import { MaskBrushModal } from "./components/MaskBrushModal";
 import { AiCutoutModal } from "./components/AiCutoutModal";
 import ModelPlaza from "./ModelPlaza";
 import { useAuth } from "./auth/AuthContext";
+import { useConversations } from "./conversation/useConversations";
+import { TimelineRail } from "./conversation/TimelineRail";
 
 // 角色 → 侧边栏副标显示
 const ROLE_LABEL: Record<"admin" | "user" | "paid", string> = {
@@ -519,13 +521,14 @@ function SimpleGenerateView({
   onShapesChange: (shapes: GlassShape[]) => void;
 }) {
   const { user } = useAuth();
-  // 七张外层玻璃壳：左侧栏、参考图、参数、结果、最近作品、底部 Prompt 条、右侧 AI 对话
+  // 七张外层玻璃壳：左侧栏、参考图、参数、结果、最近作品、AI 对话、历史时间轴
   const sidebarRef = useRef<HTMLDivElement | null>(null);
   const referenceCardRef = useRef<HTMLDivElement | null>(null);
   const settingsCardRef = useRef<HTMLDivElement | null>(null);
   const resultsCardRef = useRef<HTMLDivElement | null>(null);
   const recentCardRef = useRef<HTMLDivElement | null>(null);
   const chatPanelRef = useRef<HTMLDivElement | null>(null);
+  const timelineRailRef = useRef<HTMLDivElement | null>(null);
 
   const [activeNav, setActiveNav] = useState("studio");
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
@@ -542,16 +545,27 @@ function SimpleGenerateView({
   const [cropperSrc, setCropperSrc] = useState<string | null>(null);
   const [aiCutoutSrc, setAiCutoutSrc] = useState<string | null>(null);
 
-  // 动态对话气泡（替代硬编码三条 demo）
-  type ChatMsg = { id: number; role: "ai" | "user"; text: string; pending?: boolean };
-  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([
-    {
-      id: 0,
-      role: "ai",
-      text: "你好，把你想生成的画面打在下方输入框里，回车即可出图。",
-    },
-  ]);
-  const chatIdRef = useRef(1);
+  // 对话气泡数据：派生自 useConversations()
+  // 服务端 message → UI ChatMsg；进行中的 AI 回复用本地 pendingBubble 占位
+  type ChatMsg = { id: number | string; role: "ai" | "user"; text: string; pending?: boolean };
+  const conversations = useConversations();
+  const [pendingBubble, setPendingBubble] = useState<ChatMsg | null>(null);
+  const DEFAULT_GREET: ChatMsg = {
+    id: "greet",
+    role: "ai",
+    text: "你好，把你想生成的画面打在下方输入框里，回车即可出图。",
+  };
+  const chatMessages: ChatMsg[] = (() => {
+    const base: ChatMsg[] = conversations.current
+      ? conversations.current.messages.map((m) => ({
+          id: m.id,
+          role: m.role,
+          text: m.text,
+        }))
+      : [];
+    const out: ChatMsg[] = base.length === 0 ? [DEFAULT_GREET] : base;
+    return pendingBubble ? [...out, pendingBubble] : out;
+  })();
 
   // gpt-image-2 受控参数
   // quality 默认 low：上游通道慢，先求快出图；用户可自行切到 high
@@ -566,8 +580,6 @@ function SimpleGenerateView({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [customW, setCustomW] = useState(1024);
   const [customH, setCustomH] = useState(1024);
-  const [stream, setStream] = useState(false);
-  const [partialImages, setPartialImages] = useState("0");
 
   // 模式：generate / edit / reasoning
   const [mode, setMode] = useState<"generate" | "edit" | "reasoning">("generate");
@@ -619,14 +631,6 @@ function SimpleGenerateView({
     });
   }, []);
 
-  const removeRefAt = useCallback((idx: number) => {
-    setRefImages((prev) => {
-      const next = prev.filter((_, i) => i !== idx);
-      if (idx === 0) setRefMaskBlob(null);
-      return next;
-    });
-  }, []);
-
   const clearRefs = useCallback(() => {
     setRefImages([]);
     setRefMaskBlob(null);
@@ -665,23 +669,31 @@ function SimpleGenerateView({
   const handleGenerate = async () => {
     const prompt = chatInput.trim();
     if (!prompt || loading) return;
+
+    // 确保有一个 conversation：没有就立刻在服务端创建一个空 session
+    let convId = conversations.currentId;
+    if (convId == null) {
+      try {
+        const conv = await conversations.createConversation();
+        convId = conv.id;
+      } catch (e) {
+        setErrorMsg(e instanceof Error ? e.message : "创建会话失败");
+        return;
+      }
+    }
+
     if (ratio === "custom" && customSizeError) {
-      setChatMessages((m) => [
-        ...m,
-        { id: chatIdRef.current++, role: "user", text: prompt },
-        { id: chatIdRef.current++, role: "ai", text: `无法生成：${customSizeError}` },
-      ]);
+      // 校验失败也持久化（user + ai 错误），保持历史完整
+      void conversations.appendMessage(convId, { role: "user", text: prompt });
+      void conversations.appendMessage(convId, { role: "ai", text: `无法生成：${customSizeError}` });
       setChatInput("");
       return;
     }
     const apiSize = (effectiveSize ?? "auto").toString();
-    const userMsgId = chatIdRef.current++;
-    const aiPendingId = chatIdRef.current++;
-    setChatMessages((m) => [
-      ...m,
-      { id: userMsgId, role: "user", text: prompt },
-      { id: aiPendingId, role: "ai", text: "生成中", pending: true },
-    ]);
+    // 先把 user message 写入服务端（同步乐观更新到本地）
+    void conversations.appendMessage(convId, { role: "user", text: prompt });
+    // 展示 AI pending 气泡（仅本地 UI 态，不写库）
+    setPendingBubble({ id: "pending", role: "ai", text: "生成中", pending: true });
     setChatInput("");
     setLoading(true);
     setErrorMsg(null);
@@ -743,17 +755,21 @@ function SimpleGenerateView({
         // 更新 lastResultSrc 为最新生成图
         const src = allImages[0] ? imageToSrc(allImages[0], format) : null;
         if (src) setLastResultSrc(src);
-        setChatMessages((m) =>
-          m.map((msg) =>
-            msg.id === aiPendingId
-              ? {
-                  ...msg,
-                  pending: false,
-                  text: `已修改 ${allImages.length} 张 · ${mergedUsage.total_tokens} tokens`,
-                }
-              : msg,
-          ),
-        );
+        // 持久化 AI 回复 + 图片 URL（仅保留远端 https 链接；data URL 不存）
+        const remoteUrls = allImages.map((img) => img.url).filter((u): u is string => !!u);
+        setPendingBubble(null);
+        void conversations.appendMessage(convId, {
+          role: "ai",
+          text: `已修改 ${allImages.length} 张 · ${mergedUsage.total_tokens} tokens`,
+          image_urls: remoteUrls.length > 0 ? remoteUrls : undefined,
+          params: {
+            mode: "edit",
+            size: apiSize,
+            quality,
+            n: count,
+            usage: mergedUsage,
+          },
+        });
       } else {
         // 中转商对 n>1 会返回单张拼接图，前端拆成 N 个并行 n=1 请求合并结果，
         // 保证每张图独立、可逐张预览。
@@ -788,17 +804,23 @@ function SimpleGenerateView({
         // 记住第一张图用于 Edit
         const src = allImages[0] ? imageToSrc(allImages[0], format) : null;
         if (src) setLastResultSrc(src);
-        setChatMessages((m) =>
-          m.map((msg) =>
-            msg.id === aiPendingId
-              ? {
-                  ...msg,
-                  pending: false,
-                  text: `已生成 ${allImages.length} 张 · ${mergedUsage.total_tokens} tokens`,
-                }
-              : msg,
-          ),
-        );
+        // 持久化 AI 回复 + 图片 URL
+        const remoteUrls = allImages.map((img) => img.url).filter((u): u is string => !!u);
+        setPendingBubble(null);
+        void conversations.appendMessage(convId, {
+          role: "ai",
+          text: `已生成 ${allImages.length} 张 · ${mergedUsage.total_tokens} tokens`,
+          image_urls: remoteUrls.length > 0 ? remoteUrls : undefined,
+          params: {
+            mode: mode,
+            size: apiSize,
+            quality,
+            n: count,
+            background,
+            output_format: format,
+            usage: mergedUsage,
+          },
+        });
       }
     } catch (e) {
       const msg =
@@ -808,11 +830,8 @@ function SimpleGenerateView({
             ? e.message
             : String(e);
       setErrorMsg(msg);
-      setChatMessages((mm) =>
-        mm.map((m) =>
-          m.id === aiPendingId ? { ...m, pending: false, text: `失败：${msg}` } : m,
-        ),
-      );
+      setPendingBubble(null);
+      void conversations.appendMessage(convId, { role: "ai", text: `失败：${msg}` });
     } finally {
       setLoading(false);
     }
@@ -831,6 +850,7 @@ function SimpleGenerateView({
       resultsCardRef,
       recentCardRef,
       chatPanelRef,
+      timelineRailRef,
     ];
     const measure = () => {
       const shapes = refs
@@ -1393,6 +1413,16 @@ function SimpleGenerateView({
 
         {activeNav !== "models" && (
         <>
+        {/* 历史时间轴 —— 透明壳，玻璃质感由全屏 LiquidGlass WebGL 渲染 */}
+        <TimelineRail
+          ref={timelineRailRef}
+          state={conversations}
+          onNew={() => conversations.setCurrentId(null)}
+          onSelectConversation={() => {
+            // 切换会话时清掉本地 pending bubble（未完成的生成不跨会话）
+            setPendingBubble(null);
+          }}
+        />
         {/* 右侧 AI 对话面板 */}
         <aside
           ref={chatPanelRef}
@@ -1406,7 +1436,12 @@ function SimpleGenerateView({
               </span>
               <span className="text-[13px] font-medium text-white/92">AI 助手</span>
             </div>
-            <button className="text-[11px] text-white/45 hover:text-white/72">新对话</button>
+            <button
+              onClick={() => conversations.setCurrentId(null)}
+              className="text-[11px] text-white/45 hover:text-white/72"
+            >
+              新对话
+            </button>
           </div>
 
           {/* 消息区 */}
@@ -1600,60 +1635,6 @@ function MetricChip({ label, value }: { label: string; value: string }) {
   );
 }
 
-/* 上传 / 附件 / 图片 图标 */
-function UploadIcon() {
-  return (
-    <svg
-      width="22"
-      height="22"
-      viewBox="0 0 22 22"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M11 14V4M11 4l-3.5 3.5M11 4l3.5 3.5M4 15v1.5A1.5 1.5 0 0 0 5.5 18h11a1.5 1.5 0 0 0 1.5-1.5V15" />
-    </svg>
-  );
-}
-
-function AttachIcon() {
-  return (
-    <svg
-      width="16"
-      height="16"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M9.5 5.5L5 10a2 2 0 0 0 2.83 2.83l5-5a3.5 3.5 0 1 0-4.95-4.95l-5.5 5.5a5 5 0 0 0 7.07 7.07L13.5 11" />
-    </svg>
-  );
-}
-
-function ImageIcon() {
-  return (
-    <svg
-      width="16"
-      height="16"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <rect x="2" y="3" width="12" height="10" rx="1.5" />
-      <circle cx="5.5" cy="6.5" r="1" />
-      <path d="M14 11l-3-3-4 4-2-2-3 3" />
-    </svg>
-  );
-}
-
 /* ---------- 侧栏 / 聊天 ---------- */
 const SIDEBAR_ITEMS: ReadonlyArray<{ key: string; label: string; icon: ReactNode }> = [
   { key: "studio", label: "工作室", icon: <StudioIcon /> },
@@ -1813,14 +1794,6 @@ function GearIcon() {
     <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="10" cy="10" r="2.4" />
       <path d="M16.5 10a6.5 6.5 0 0 0-.1-1.1l1.5-1.1-1.3-2.2-1.7.6a6.5 6.5 0 0 0-1.9-1.1L12.7 3h-2.6l-.3 2.1a6.5 6.5 0 0 0-1.9 1.1l-1.7-.6L4.9 7.8l1.5 1.1a6.5 6.5 0 0 0 0 2.2L4.9 12.2l1.3 2.2 1.7-.6a6.5 6.5 0 0 0 1.9 1.1l.3 2.1h2.6l.3-2.1a6.5 6.5 0 0 0 1.9-1.1l1.7.6 1.3-2.2-1.5-1.1c.07-.36.1-.73.1-1.1z" />
-    </svg>
-  );
-}
-function MaskIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="7.5" cy="10" r="4.5" />
-      <circle cx="12.5" cy="10" r="4.5" />
     </svg>
   );
 }
@@ -2173,62 +2146,6 @@ function rectToGlassShape(rect: DOMRect): GlassShape {
   };
 }
 
-function GenerateField({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options?: readonly string[];
-  onChange?: (v: string) => void;
-}) {
-  const opts = options ?? [value];
-  return (
-    <label className="block rounded-[14px] border border-white/[0.04] bg-[#141418] px-3 py-3">
-      <span className="mb-2 block text-[11px] text-white/42">{label}</span>
-      <select
-        value={value}
-        onChange={(e) => onChange?.(e.target.value)}
-        className="w-full bg-transparent text-[13px] font-medium text-white/86 outline-none [&>option]:bg-[#141418] [&>option]:text-white/86"
-      >
-        {opts.map((o) => (
-          <option key={o} value={o}>
-            {o}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-function ResultTile({ large = false }: { large?: boolean }) {
-  return (
-    <article className="group relative h-full w-full overflow-hidden rounded-[20px] border border-white/[0.05] bg-[#111114]">
-      <div className={large ? "h-full" : "h-full min-h-[180px]"}>
-        <DemoBearArtwork />
-      </div>
-      <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between rounded-full border border-white/[0.08] bg-[#17171b]/86 px-3 py-2 opacity-0 transition-opacity group-hover:opacity-100">
-        <span className="text-[12px] text-white/70">PNG / 1x</span>
-        <div className="flex items-center gap-2 text-white/64">
-          <CopyIcon />
-          <DownloadIcon />
-        </div>
-      </div>
-    </article>
-  );
-}
-
-function MiniMetric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="min-w-[72px] rounded-[14px] border border-white/[0.04] bg-[#141418] px-3 py-2">
-      <div className="text-[10px] text-white/35">{label}</div>
-      <div className="tnum mt-1 text-[12px] text-white/74">{value}</div>
-    </div>
-  );
-}
-
 /* ---------- 顶部条（按参考图 1:1 复刻） ---------- */
 function TopBarReplica({
   mode,
@@ -2315,123 +2232,6 @@ function TopBarTab({
     >
       {children}
     </button>
-  );
-}
-
-function TopBarIconButton({
-  children,
-  className = "",
-  ...rest
-}: { children: ReactNode; className?: string } & ButtonHTMLAttributes<HTMLButtonElement>) {
-  return (
-    <button
-      {...rest}
-      className={`grid h-12 w-12 place-items-center rounded-[10px] ${topBarSurface()} ${className}`}
-    >
-      {children}
-    </button>
-  );
-}
-
-function TopBarProjectTab() {
-  return (
-    <button
-      className={`flex h-12 min-w-[154px] items-center justify-center gap-4 rounded-[10px] px-5 text-[12px] font-medium ${topBarSurface()}`}
-    >
-      <span>Black bear</span>
-      <TopBarClose size={12} className="text-white/26" />
-    </button>
-  );
-}
-
-function TopBarQueueButton() {
-  return (
-    <button
-      className={`flex h-12 min-w-[144px] items-center justify-center gap-4 rounded-[10px] px-5 text-[14px] font-medium ${topBarSurface()}`}
-    >
-      <TopBarPlay />
-      <span>队列</span>
-      <TopBarChevron dir="down" className="text-white/48" />
-    </button>
-  );
-}
-
-function TopBarStepper() {
-  return (
-    <div className={`flex h-12 w-10 flex-col items-center justify-center gap-1 rounded-[10px] ${topBarSurface()}`}>
-      <button aria-label="Move up" className="grid h-4 w-full place-items-center text-white/45 hover:text-white/80">
-        <TopBarChevron dir="up" size={8} />
-      </button>
-      <button aria-label="Move down" className="grid h-4 w-full place-items-center text-white/45 hover:text-white/80">
-        <TopBarChevron dir="down" size={8} />
-      </button>
-    </div>
-  );
-}
-
-function TopBarChevron({
-  dir,
-  size = 10,
-  className = "",
-}: {
-  dir: "up" | "down" | "left" | "right";
-  size?: number;
-  className?: string;
-}) {
-  const paths = {
-    up: "M 1 7 L 6 2 L 11 7",
-    down: "M 1 5 L 6 10 L 11 5",
-    left: "M 8 1 L 3 6 L 8 11",
-    right: "M 4 1 L 9 6 L 4 11",
-  };
-  return (
-    <svg width={size * 1.2} height={size * 1.2} viewBox="0 0 12 12" className={className}>
-      <path d={paths[dir]} fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function TopBarPlay() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" className="text-white/92">
-      <path d="M 4.25 2.75 L 12.5 8 L 4.25 13.25 Z" fill="none" stroke="currentColor" strokeWidth="1.45" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function TopBarDots() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" className="text-white/58">
-      <circle cx="8" cy="4" r="1.05" fill="currentColor" />
-      <circle cx="8" cy="8" r="1.05" fill="currentColor" />
-      <circle cx="8" cy="12" r="1.05" fill="currentColor" />
-    </svg>
-  );
-}
-
-function TopBarClose({ size = 16, className = "text-white/58" }: { size?: number; className?: string }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" className={className}>
-      <path d="M 4.5 4.5 L 11.5 11.5 M 11.5 4.5 L 4.5 11.5" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function TopBarCamera() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" className="text-white/58">
-      <rect x="3.25" y="4.25" width="9.5" height="8.5" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.25" />
-      <path d="M 6 4.25 L 6.75 2.9 H 9.25 L 10 4.25" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
-      <circle cx="8" cy="8.6" r="2" fill="none" stroke="currentColor" strokeWidth="1.25" />
-    </svg>
-  );
-}
-
-function TopBarMenu() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" className="text-white/58">
-      <path d="M 4 5 H 12 M 4 8 H 12 M 4 11 H 12" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
-    </svg>
   );
 }
 

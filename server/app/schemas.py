@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -137,3 +137,64 @@ class TokenResponse(BaseModel):
     token_type: Literal["Bearer"] = "Bearer"
     expires_in: int  # 秒
     user: UserPublic
+
+
+# ===== AI 对话历史 =====
+
+MessageRoleT = Literal["user", "ai"]
+
+
+class MessageOut(BaseModel):
+    """单条消息的对外视图"""
+
+    id: int
+    role: MessageRoleT
+    text: str
+    image_urls: list[str] | None = None
+    params: dict[str, Any] | None = None
+    created_at: datetime
+
+
+class ConversationListOut(BaseModel):
+    """会话列表项（不含 messages，只带 preview 用于卡片渲染）"""
+
+    id: int
+    title: str
+    pinned: bool
+    preview: str  # 首条 user.text 前 60 字
+    message_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationDetailOut(ConversationListOut):
+    """会话详情 —— 列表项 + 完整 messages"""
+
+    messages: list[MessageOut]
+
+
+class ConversationPatchIn(BaseModel):
+    """PATCH 请求：重命名 / 置顶（两者均可单独使用）"""
+
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    pinned: bool | None = None
+
+
+class MessageCreateIn(BaseModel):
+    """追加消息请求"""
+
+    role: MessageRoleT
+    text: str = Field(default="", max_length=20000)
+    image_urls: list[str] | None = None
+    params: dict[str, Any] | None = None
+
+    @field_validator("image_urls")
+    @classmethod
+    def _validate_urls(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        # 仅检查是否为 http(s)；不做更严格 URL 解析（中转商有时返回非标准 URL）
+        for url in v:
+            if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+                raise ValueError("image_urls 必须是 http/https URL")
+        return v

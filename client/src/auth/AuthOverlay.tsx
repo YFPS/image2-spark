@@ -13,6 +13,7 @@
 
 import { useEffect, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import { AuthApiError } from "../api/auth";
+import Image2SigninFrame from "../generated/Image2SigninFrame";
 import { useAuth } from "./AuthContext";
 
 type Tab = "login" | "register";
@@ -68,6 +69,7 @@ export function AuthOverlay() {
   const [showPwd, setShowPwd] = useState(false);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [showGeneratedFrame, setShowGeneratedFrame] = useState(false);
 
   // 右下遥测块：实时秒/迭代/种子
   const [elapsed, setElapsed] = useState(0);
@@ -97,6 +99,21 @@ export function AuthOverlay() {
     setTab(t);
     setErr("");
   };
+
+  if (showGeneratedFrame) {
+    return (
+      <div className="fixed inset-0 z-[1000] overflow-hidden">
+        <Image2SigninFrame />
+        <button
+          type="button"
+          onClick={() => setShowGeneratedFrame(false)}
+          className="absolute right-6 top-6 z-50 rounded-full border border-white/[0.12] bg-[#1c1c2099] px-4 py-2 text-[12px] font-medium text-white/80 shadow-[0_8px_32px_rgba(0,0,0,0.45)] backdrop-blur-[18px] transition hover:bg-white/[0.08] hover:text-white active:scale-[0.98]"
+        >
+          返回当前登录页
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -180,6 +197,21 @@ export function AuthOverlay() {
       </div>
 
       {/* 5. 中央登录节点卡 */}
+      <button
+        type="button"
+        onClick={() => setShowGeneratedFrame(true)}
+        className="absolute right-8 top-7 z-20 rounded-full border border-white/[0.10] px-4 py-2 text-[12px] font-medium transition-all hover:-translate-y-0.5 hover:border-white/[0.18] hover:bg-white/[0.08] active:scale-[0.98]"
+        style={{
+          background: "rgba(28,28,32,0.60)",
+          color: "rgba(255,255,255,0.78)",
+          backdropFilter: "blur(18px) saturate(140%)",
+          WebkitBackdropFilter: "blur(18px) saturate(140%)",
+          boxShadow: "0 8px 32px rgba(0,0,0,0.35)",
+        }}
+      >
+        测试新版登录页
+      </button>
+
       <div
         className="absolute left-1/2 top-1/2 z-10 w-[400px] -translate-x-1/2 -translate-y-1/2"
         style={{ fontFamily: FONT }}

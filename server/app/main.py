@@ -14,7 +14,7 @@ from sqlalchemy import text
 from .config import get_settings
 from .db import get_engine
 from .redis_client import get_redis
-from .routers import auth, images
+from .routers import auth, conversations, images
 
 logger = logging.getLogger("image2")
 
@@ -86,6 +86,7 @@ async def _validation_handler(request: Request, exc: RequestValidationError):
 
 app.include_router(images.router)
 app.include_router(auth.router)
+app.include_router(conversations.router)
 
 
 @app.get("/api/health")
