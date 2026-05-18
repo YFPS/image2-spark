@@ -6,6 +6,7 @@
 precision highp float;
 
 #define MAX_SHAPES 8
+#define MAX_LIGHTS 5
 
 in vec2 v_uv;
 out vec4 fragColor;
@@ -25,6 +26,13 @@ uniform int u_shapeCount;
 uniform vec2 u_shapeCenters[MAX_SHAPES]; // GLSL 像素坐标
 uniform vec2 u_shapeSizes[MAX_SHAPES];   // (width, height) 像素
 uniform float u_shapeRadii[MAX_SHAPES];  // 圆角像素
+
+// 光球数组（JS 端按 Lissajous 算好后上传）
+uniform int u_lightCount;
+uniform vec2 u_lightPositions[MAX_LIGHTS];   // GLSL 像素坐标（已乘 dpr）
+uniform float u_lightIntensities[MAX_LIGHTS]; // 0.65..1.35，呼吸调制后
+uniform vec3 u_lightColors[MAX_LIGHTS];       // 线性 RGB 0..1
+uniform float u_lightRadii[MAX_LIGHTS];       // CSS px，shader 内乘 u_dpr
 
 float superellipseCornerSDF(vec2 p, float r, float n) {
   p = abs(p);
@@ -83,18 +91,15 @@ vec3 calcCanvasBg(vec2 fragPx) {
   float dotMask = 1.0 - smoothstep(dotR, dotR + 1.0, length(gridP));
   bg += vec3(1.0) * 0.06 * dotMask;
 
-  // top-left magenta blob
-  vec2 c1 = vec2(u_resolution.x * 0.25, u_resolution.y * 1.0);
-  float d1 = length(fragPx - c1) / (480.0 * u_dpr);
-  bg += vec3(1.0, 0.31, 0.78) * 0.25 * smoothstep(1.0, 0.0, d1);
-  // bottom-right cyan blob
-  vec2 c2 = vec2(u_resolution.x * 0.75, u_resolution.y * 0.0);
-  float d2 = length(fragPx - c2) / (520.0 * u_dpr);
-  bg += vec3(0.31, 0.71, 1.0) * 0.20 * smoothstep(1.0, 0.0, d2);
-  // mid-right violet blob
-  vec2 c3 = vec2(u_resolution.x * 0.90, u_resolution.y * 0.66);
-  float d3 = length(fragPx - c3) / (360.0 * u_dpr);
-  bg += vec3(0.55, 0.39, 1.0) * 0.18 * smoothstep(1.0, 0.0, d3);
+  // 5 个游走光球：循环计算 falloff + 颜色 × 呼吸强度 累加
+  for (int i = 0; i < MAX_LIGHTS; i++) {
+    if (i >= u_lightCount) break;
+    vec2 lpos = u_lightPositions[i];
+    float lrad = u_lightRadii[i] * u_dpr;
+    float d = length(fragPx - lpos) / lrad;
+    float falloff = smoothstep(1.0, 0.0, d);
+    bg += u_lightColors[i] * 0.25 * u_lightIntensities[i] * falloff;
+  }
 
   return bg;
 }
@@ -117,12 +122,6 @@ void main() {
   vec2 shadowSamplePos = gl_FragCoord.xy - vec2(u_shadowPosition.x * u_dpr, u_shadowPosition.y * u_dpr);
   float merged = mainSDF(shadowSamplePos);
   float shadow = exp(-1.0 / u_shadowExpand * abs(merged) * u_resolution1x.y) * 0.6 * u_shadowFactor;
-
-  // === TEMP wiring 验证：整屏亮度做 1Hz 呼吸 ===
-  // sin(t*2π) 周期 1s，振幅 ±2%；u_motionScale=0 时归零
-  float breathe = sin(u_time * 6.2831853) * 0.02 * u_motionScale;
-  bgColor += vec3(breathe);
-  // === TEMP end ===
 
   fragColor = vec4(bgColor - vec3(shadow), 1.0);
 }

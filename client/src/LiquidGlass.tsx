@@ -14,6 +14,31 @@ import type { GlassParams } from "./GlassControls";
 
 const MAX_SHAPES = 8;
 
+// 光球数：与 shader 内 MAX_LIGHTS 保持一致
+const MAX_LIGHTS = 5;
+
+// 5 个光球的静态属性
+//   anchor:        uv 0..1 锚点（屏幕左上 0,0；右下 1,1）
+//   color:         线性 RGB 0..1
+//   radius:        CSS px（光球柔晕半径，未乘 dpr）
+//   phaseX/phaseY: 位置 Lissajous 起始相位（弧度）
+//   breathPhase:   亮度呼吸起始相位（弧度）
+const LIGHT_BALLS = [
+  { anchor: [0.20, 0.30], color: [1.00, 0.31, 0.78], radius: 480, phaseX: 0.0, phaseY: 1.7, breathPhase: 0.0 },
+  { anchor: [0.78, 0.22], color: [0.31, 0.71, 1.00], radius: 520, phaseX: 2.1, phaseY: 3.9, breathPhase: 1.3 },
+  { anchor: [0.85, 0.70], color: [0.55, 0.39, 1.00], radius: 360, phaseX: 4.3, phaseY: 0.8, breathPhase: 2.7 },
+  { anchor: [0.30, 0.78], color: [1.00, 1.00, 1.00], radius: 400, phaseX: 5.5, phaseY: 2.2, breathPhase: 4.1 },
+  { anchor: [0.55, 0.50], color: [1.00, 1.00, 1.00], radius: 380, phaseX: 1.0, phaseY: 4.6, breathPhase: 5.5 },
+] as const;
+
+// Lissajous 位置参数与呼吸参数
+const POS_FREQ_A = 0.05;       // rad/s
+const POS_FREQ_B = 0.037;      // rad/s
+const POS_AMP_X = 0.32;        // ±32% 视口宽度
+const POS_AMP_Y = 0.28;        // ±28% 视口高度
+const BREATH_PERIOD = 12;      // 秒
+const BREATH_AMP = 0.35;       // ±35% 基线
+
 export type GlassShape = {
   centerX: number; // CSS 像素，DOM 坐标系（左上为原点）
   centerY: number;
@@ -91,6 +116,12 @@ export function LiquidGlass({
     const centersFlat = new Array<number>(MAX_SHAPES * 2).fill(0);
     const sizesFlat = new Array<number>(MAX_SHAPES * 2).fill(0);
     const radiiFlat = new Array<number>(MAX_SHAPES).fill(0);
+
+    // 光球 uniform 数组（一次性分配，每帧填值）
+    const lightPosFlat = new Array<number>(MAX_LIGHTS * 2).fill(0);
+    const lightIntensityFlat = new Array<number>(MAX_LIGHTS).fill(0);
+    const lightColorFlat = new Array<number>(MAX_LIGHTS * 3).fill(0);
+    const lightRadiusFlat = new Array<number>(MAX_LIGHTS).fill(0);
     let cachedBlurRadius = -1;
     let cachedBlurWeights: number[] = [];
 
@@ -129,6 +160,35 @@ export function LiquidGlass({
       const mouseGlX = m.x * dpr;
       const mouseGlY = (height - m.y) * dpr;
 
+      // 光球状态：Lissajous 位置 + 正弦呼吸亮度
+      const tSec = (performance.now() - startedAt) / 1000;
+      const tAnim = tSec * motionScale; // reduced-motion 时 tAnim≡0，球回到锚点
+      for (let i = 0; i < MAX_LIGHTS; i++) {
+        const b = LIGHT_BALLS[i];
+        const dx =
+          POS_AMP_X *
+          Math.sin(tAnim * POS_FREQ_A + b.phaseX) *
+          Math.cos(tAnim * POS_FREQ_B + b.phaseX * 1.3);
+        const dy =
+          POS_AMP_Y *
+          Math.sin(tAnim * POS_FREQ_B + b.phaseY) *
+          Math.cos(tAnim * POS_FREQ_A + b.phaseY * 1.7);
+        const px = (b.anchor[0] + dx) * width;
+        const py = (b.anchor[1] + dy) * height;
+        lightPosFlat[i * 2] = px * dpr;
+        lightPosFlat[i * 2 + 1] = (height - py) * dpr; // DOM → GLSL y 翻转
+
+        const breath =
+          1 + BREATH_AMP * Math.sin(tAnim * ((2 * Math.PI) / BREATH_PERIOD) + b.breathPhase);
+        lightIntensityFlat[i] = breath;
+
+        lightColorFlat[i * 3] = b.color[0];
+        lightColorFlat[i * 3 + 1] = b.color[1];
+        lightColorFlat[i * 3 + 2] = b.color[2];
+
+        lightRadiusFlat[i] = b.radius;
+      }
+
       // 高斯核缓存（blurRadius 变化时才重算）
       if (p.blurRadius !== cachedBlurRadius) {
         cachedBlurRadius = p.blurRadius;
@@ -148,6 +208,11 @@ export function LiquidGlass({
         u_shapeRadii: radiiFlat,
         u_time: (performance.now() - startedAt) / 1000,
         u_motionScale: motionScale,
+        u_lightCount: MAX_LIGHTS,
+        u_lightPositions: lightPosFlat,
+        u_lightIntensities: lightIntensityFlat,
+        u_lightColors: lightColorFlat,
+        u_lightRadii: lightRadiusFlat,
       });
 
       renderer.render({
