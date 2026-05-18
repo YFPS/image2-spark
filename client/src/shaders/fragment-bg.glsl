@@ -84,12 +84,22 @@ float pointInGlass(vec2 px) {
 vec3 calcCanvasBg(vec2 fragPx) {
   vec3 bg = vec3(0.051); // #0D0D0D
 
-  // dot-grid
+  // dot-grid —— 位置不动（作为对齐参考系），亮度被最近光球"照亮"
   float gridSize = 24.0 * u_dpr;
   vec2 gridP = mod(fragPx, gridSize) - gridSize * 0.5;
   float dotR = 1.0 * u_dpr;
   float dotMask = 1.0 - smoothstep(dotR, dotR + 1.0, length(gridP));
-  bg += vec3(1.0) * 0.06 * dotMask;
+
+  // 每点亮度：基线 0.06 + 距光球 200px 内的加亮（最大 0.06，合计 0.12 上限）
+  // 用 max 而非加法，避免多球叠加把亮度推过 0.12
+  float dotBoost = 0.0;
+  for (int i = 0; i < MAX_LIGHTS; i++) {
+    if (i >= u_lightCount) break;
+    float dd = length(fragPx - u_lightPositions[i]);
+    float ringFalloff = smoothstep(200.0 * u_dpr, 0.0, dd);
+    dotBoost = max(dotBoost, ringFalloff * u_lightIntensities[i] * 0.06);
+  }
+  bg += vec3(0.06 + dotBoost) * dotMask;
 
   // 5 个游走光球：循环计算 falloff + 颜色 × 呼吸强度 累加
   for (int i = 0; i < MAX_LIGHTS; i++) {
