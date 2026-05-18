@@ -2,6 +2,9 @@
 import { authFetch, AuthApiError } from "./auth";
 
 export type MessageRole = "user" | "ai";
+// 异步生成状态：done（落库完成）/ pending（后台 task 进行中）/ failed（上游异常）
+// user 消息恒为 done；AI 消息可能为 pending（前端从此 status 识别"生成中"占位 + 启动轮询）
+export type MessageStatus = "done" | "pending" | "failed";
 
 export type MessageOut = {
   id: number;
@@ -9,6 +12,7 @@ export type MessageOut = {
   text: string;
   image_urls: string[] | null;
   params: Record<string, unknown> | null;
+  status: MessageStatus;
   created_at: string;
 };
 

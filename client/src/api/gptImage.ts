@@ -1,4 +1,9 @@
 // gpt-image-2 出图后端代理 client（前端调 /api，由 Vite proxy 或 nginx 转发到 FastAPI）
+//
+// 任务化生图：后端立即返回 pending ai message，前端轮询 GET /api/conversations/{id} 等 status 变化
+// 旧的同步 generateImages/editImage 已经移除 —— 解决"刷新页面丢生图结果"的 bug
+import { authFetch } from "./auth";
+import type { MessageOut } from "./conversations";
 
 export type GenerateRequest = {
   prompt: string;
@@ -50,24 +55,36 @@ export function normalizeSize(size: string): string {
   return size.replace(/×/g, "x");
 }
 
-export async function generateImages(req: GenerateRequest): Promise<GenerateResponse> {
+/**
+ * 文本生图（任务化）：立刻拿 pending ai message，前端轮询 conversation 详情看 status 变化
+ * @param req 生图参数
+ * @param conversationId 目标会话 id；后端把生成结果写入此会话
+ */
+export async function generateImages(
+  req: GenerateRequest,
+  conversationId: number,
+): Promise<MessageOut> {
   const body: GenerateRequest = {
     ...req,
     model: req.model ?? "gpt-image-2",
     size: normalizeSize(req.size),
   };
 
-  const res = await fetch("/api/images/generate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const res = await authFetch(
+    `/api/images/generate?conversation_id=${conversationId}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
 
   if (!res.ok) {
     let apiError: ApiError = { code: "http_error", message: `HTTP ${res.status}` };
     try {
       const j = await res.json();
       if (j.error) apiError = j.error;
+      else if (j.detail?.error) apiError = j.detail.error;
       else if (j.detail) apiError.message = String(j.detail);
     } catch {
       /* 忽略解析错误 */
@@ -75,7 +92,7 @@ export async function generateImages(req: GenerateRequest): Promise<GenerateResp
     throw new GenerateError(apiError);
   }
 
-  return (await res.json()) as GenerateResponse;
+  return (await res.json()) as MessageOut;
 }
 
 /** 把后端返回的 image 转成可用的 <img src> */
@@ -119,8 +136,15 @@ export type EditRequest = {
   background?: string;
 };
 
-/** 调后端 /api/images/edit，返回新生成的 GenerateResponse */
-export async function editImage(req: EditRequest): Promise<GenerateResponse> {
+/**
+ * 修图 / 编辑（任务化）：行为同 generateImages
+ * @param req imageBlobs + maskBlob + prompt
+ * @param conversationId 目标会话 id
+ */
+export async function editImage(
+  req: EditRequest,
+  conversationId: number,
+): Promise<MessageOut> {
   const form = new FormData();
   if (req.imageBlobs.length === 0) {
     throw new GenerateError({ code: "validation_error", message: "至少需要 1 张参考图" });
@@ -128,23 +152,25 @@ export async function editImage(req: EditRequest): Promise<GenerateResponse> {
   req.imageBlobs.forEach((b, i) => form.append("image", b, `image-${i}.png`));
   form.append("mask", req.maskBlob, "mask.png");
   form.append("prompt", req.prompt);
+  form.append("conversation_id", String(conversationId));
   if (req.size) form.append("size", req.size);
   if (req.quality) form.append("quality", req.quality);
   if (req.n != null) form.append("n", String(req.n));
   if (req.background) form.append("background", req.background);
 
-  const res = await fetch("/api/images/edit", { method: "POST", body: form });
+  const res = await authFetch("/api/images/edit", { method: "POST", body: form });
   if (!res.ok) {
     let apiError: ApiError = { code: "http_error", message: `HTTP ${res.status}` };
     try {
       const j = await res.json();
       if (j.error) apiError = j.error;
+      else if (j.detail?.error) apiError = j.detail.error;
     } catch {
       /* 忽略 */
     }
     throw new GenerateError(apiError);
   }
-  return (await res.json()) as GenerateResponse;
+  return (await res.json()) as MessageOut;
 }
 
 /**

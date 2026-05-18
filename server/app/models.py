@@ -33,6 +33,9 @@ CreditReason = Literal[
     "adjust",
 ]
 MessageRole = Literal["user", "ai"]
+# AI 消息的生命周期：客户端发起生图请求后立即落 pending；后台 task 完成时改 done 或 failed
+# user 消息恒为 done（无需 await 上游）
+MessageStatus = Literal["done", "pending", "failed"]
 
 
 class User(Base):
@@ -172,6 +175,15 @@ class Message(Base):
     image_urls: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     # 生成参数：size / quality / model / ratio / n ... 还原 UI 用
     params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 异步生成状态：done（落库完成）/pending（后台 task 进行中）/failed（上游异常）
+    # user 消息恒为 done；AI 消息先写 pending、task 回写时 PATCH 到 done/failed
+    # 用于前端刷新页面后接管轮询，避免上游响应在前端断开时丢失
+    status: Mapped[str] = mapped_column(
+        Enum("done", "pending", "failed", name="message_status"),
+        nullable=False,
+        default="done",
+        server_default="done",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.current_timestamp()
     )

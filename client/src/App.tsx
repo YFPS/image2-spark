@@ -35,7 +35,8 @@ import { AiCutoutModal } from "./components/AiCutoutModal";
 import ModelPlaza from "./ModelPlaza";
 import { useAuth } from "./auth/AuthContext";
 import { useConversations } from "./conversation/useConversations";
-import { TimelineRail } from "./conversation/TimelineRail";
+import { HistoryDropdown } from "./conversation/HistoryDropdown";
+import { TimelineQuickJump } from "./conversation/TimelineQuickJump";
 
 // 角色 → 侧边栏副标显示
 const ROLE_LABEL: Record<"admin" | "user" | "paid", string> = {
@@ -528,7 +529,9 @@ function SimpleGenerateView({
   const resultsCardRef = useRef<HTMLDivElement | null>(null);
   const recentCardRef = useRef<HTMLDivElement | null>(null);
   const chatPanelRef = useRef<HTMLDivElement | null>(null);
-  const timelineRailRef = useRef<HTMLDivElement | null>(null);
+  // 聊天消息滚动容器 —— TimelineQuickJump 用它读 scrollTop 算"当前消息"并 scrollTo 跳转
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const [activeNav, setActiveNav] = useState("studio");
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
@@ -547,7 +550,19 @@ function SimpleGenerateView({
 
   // 对话气泡数据：派生自 useConversations()
   // 服务端 message → UI ChatMsg；进行中的 AI 回复用本地 pendingBubble 占位
-  type ChatMsg = { id: number | string; role: "ai" | "user"; text: string; pending?: boolean };
+  type ChatMsg = {
+    id: number | string;
+    role: "ai" | "user";
+    text: string;
+    created_at?: string;
+    // 来自后端 message.status，决定 ChatBubble 渲染骨架 / 红字 / 缩略图
+    status?: "done" | "pending" | "failed";
+    pending?: boolean;
+    // 生图任务的产出图（done 后渲染缩略图）
+    image_urls?: string[] | null;
+    // 来自 params.request.size，决定 pending 骨架的宽高比（如 "1024x1024"）
+    size?: string;
+  };
   const conversations = useConversations();
   const [pendingBubble, setPendingBubble] = useState<ChatMsg | null>(null);
   const DEFAULT_GREET: ChatMsg = {
@@ -557,13 +572,23 @@ function SimpleGenerateView({
   };
   const chatMessages: ChatMsg[] = (() => {
     const base: ChatMsg[] = conversations.current
-      ? conversations.current.messages.map((m) => ({
-          id: m.id,
-          role: m.role,
-          text: m.text,
-        }))
+      ? conversations.current.messages.map((m) => {
+          // params.request.size 形如 "1024x1024" / "auto"；用于推断 pending 骨架比例
+          const reqSize = (m.params as { request?: { size?: string } } | null)?.request?.size;
+          return {
+            id: m.id,
+            role: m.role,
+            text: m.text,
+            created_at: m.created_at,
+            status: m.status,
+            pending: m.status === "pending",
+            image_urls: m.image_urls,
+            size: reqSize,
+          };
+        })
       : [];
     const out: ChatMsg[] = base.length === 0 ? [DEFAULT_GREET] : base;
+    // 仍保留 pendingBubble 作为本地占位通道（极少数场景：调 API 还没回 pending message 之前）
     return pendingBubble ? [...out, pendingBubble] : out;
   })();
 
@@ -692,12 +717,13 @@ function SimpleGenerateView({
     const apiSize = (effectiveSize ?? "auto").toString();
     // 先把 user message 写入服务端（同步乐观更新到本地）
     void conversations.appendMessage(convId, { role: "user", text: prompt });
-    // 展示 AI pending 气泡（仅本地 UI 态，不写库）
-    setPendingBubble({ id: "pending", role: "ai", text: "生成中", pending: true });
+    // 临时本地占位：发到拿 pending message 那 200ms 内提供反馈，attach 后清除
+    setPendingBubble({ id: "pending-local", role: "ai", text: "生成中", pending: true });
     setChatInput("");
     setLoading(true);
     setErrorMsg(null);
     try {
+      const count = Math.max(1, Number(n));
       if (mode === "edit") {
         // Edit 模式：优先用 refImages（多图），否则降级到上一次生成的图
         const sources: string[] =
@@ -726,101 +752,46 @@ function SimpleGenerateView({
           bitmap.close();
         }
 
-        // 中转商对 n>1 会返回单张拼接图，前端拆成 N 个并行 n=1 请求合并结果，
-        // 保证每张图独立、可逐张预览。
-        const count = Math.max(1, Number(n));
-        const responses = await Promise.all(
+        // 任务化：每次 n=1 并发 count 次，后端立刻返回 pending ai message
+        const pendings = await Promise.all(
           Array.from({ length: count }, () =>
-            editImage({
-              imageBlobs,
-              maskBlob,
-              prompt,
-              size: apiSize !== "auto" ? apiSize : undefined,
-              quality,
-              n: 1,
-            }),
+            editImage(
+              {
+                imageBlobs,
+                maskBlob,
+                prompt,
+                size: apiSize !== "auto" ? apiSize : undefined,
+                quality,
+                n: 1,
+              },
+              convId!,
+            ),
           ),
         );
-        const allImages = responses.flatMap((r) => r.images);
-        const mergedUsage = responses.reduce(
-          (acc, r) => ({
-            input_tokens: acc.input_tokens + r.usage.input_tokens,
-            output_tokens: acc.output_tokens + r.usage.output_tokens,
-            total_tokens: acc.total_tokens + r.usage.total_tokens,
-          }),
-          { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-        );
-        setResults(allImages);
-        setUsage(mergedUsage);
-        // 更新 lastResultSrc 为最新生成图
-        const src = allImages[0] ? imageToSrc(allImages[0], format) : null;
-        if (src) setLastResultSrc(src);
-        // 持久化 AI 回复 + 图片 URL（仅保留远端 https 链接；data URL 不存）
-        const remoteUrls = allImages.map((img) => img.url).filter((u): u is string => !!u);
-        setPendingBubble(null);
-        void conversations.appendMessage(convId, {
-          role: "ai",
-          text: `已修改 ${allImages.length} 张 · ${mergedUsage.total_tokens} tokens`,
-          image_urls: remoteUrls.length > 0 ? remoteUrls : undefined,
-          params: {
-            mode: "edit",
-            size: apiSize,
-            quality,
-            n: count,
-            usage: mergedUsage,
-          },
-        });
+        // attach 进 current.messages，触发 useConversations 的 hasPending 轮询
+        pendings.forEach((m) => conversations.attachMessage(convId!, m));
       } else {
-        // 中转商对 n>1 会返回单张拼接图，前端拆成 N 个并行 n=1 请求合并结果，
-        // 保证每张图独立、可逐张预览。
-        const count = Math.max(1, Number(n));
-        const responses = await Promise.all(
+        // 任务化：每次 n=1 并发 count 次
+        const pendings = await Promise.all(
           Array.from({ length: count }, () =>
-            generateImages({
-              model: "gpt-image-2",
-              prompt,
-              size: apiSize,
-              quality,
-              n: 1,
-              background,
-              output_format: format,
-              output_compression: format !== "png" ? compression : undefined,
-              moderation,
-              reasoning: mode === "reasoning",
-            }),
+            generateImages(
+              {
+                model: "gpt-image-2",
+                prompt,
+                size: apiSize,
+                quality,
+                n: 1,
+                background,
+                output_format: format,
+                output_compression: format !== "png" ? compression : undefined,
+                moderation,
+                reasoning: mode === "reasoning",
+              },
+              convId!,
+            ),
           ),
         );
-        const allImages = responses.flatMap((r) => r.images);
-        const mergedUsage = responses.reduce(
-          (acc, r) => ({
-            input_tokens: acc.input_tokens + r.usage.input_tokens,
-            output_tokens: acc.output_tokens + r.usage.output_tokens,
-            total_tokens: acc.total_tokens + r.usage.total_tokens,
-          }),
-          { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-        );
-        setResults(allImages);
-        setUsage(mergedUsage);
-        // 记住第一张图用于 Edit
-        const src = allImages[0] ? imageToSrc(allImages[0], format) : null;
-        if (src) setLastResultSrc(src);
-        // 持久化 AI 回复 + 图片 URL
-        const remoteUrls = allImages.map((img) => img.url).filter((u): u is string => !!u);
-        setPendingBubble(null);
-        void conversations.appendMessage(convId, {
-          role: "ai",
-          text: `已生成 ${allImages.length} 张 · ${mergedUsage.total_tokens} tokens`,
-          image_urls: remoteUrls.length > 0 ? remoteUrls : undefined,
-          params: {
-            mode: mode,
-            size: apiSize,
-            quality,
-            n: count,
-            background,
-            output_format: format,
-            usage: mergedUsage,
-          },
-        });
+        pendings.forEach((m) => conversations.attachMessage(convId!, m));
       }
     } catch (e) {
       const msg =
@@ -830,12 +801,63 @@ function SimpleGenerateView({
             ? e.message
             : String(e);
       setErrorMsg(msg);
-      setPendingBubble(null);
       void conversations.appendMessage(convId, { role: "ai", text: `失败：${msg}` });
     } finally {
+      // 拿到 pending message attach 后，本地占位作用结束 —— 消息渲染由 current.messages 接管
+      setPendingBubble(null);
       setLoading(false);
     }
   };
+
+  // 监听 current.messages 中 pending → done 的 ai message：提取 image_urls / usage 更新右栏 UI state
+  // 切换会话时重置 seen 集合，避免误把"切回历史会话"中的旧 done 当作新生成结果触发
+  const seenDoneAiRef = useRef<{ convId: number | null; ids: Set<number> }>({
+    convId: null,
+    ids: new Set(),
+  });
+  useEffect(() => {
+    const cur = conversations.current;
+    if (!cur) return;
+    if (seenDoneAiRef.current.convId !== cur.id) {
+      seenDoneAiRef.current = {
+        convId: cur.id,
+        ids: new Set(
+          cur.messages
+            .filter((m) => m.role === "ai" && m.status === "done")
+            .map((m) => m.id),
+        ),
+      };
+      return;
+    }
+    const newDone = cur.messages.filter(
+      (m) => m.role === "ai" && m.status === "done" && !seenDoneAiRef.current.ids.has(m.id),
+    );
+    if (newDone.length === 0) return;
+    for (const m of newDone) seenDoneAiRef.current.ids.add(m.id);
+
+    // 合并新 done 的 image_urls + usage，更新右侧 results 区
+    const allImgs: ApiImage[] = [];
+    let totalUsage: ApiUsage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+    for (const m of newDone) {
+      if (m.image_urls) {
+        for (const u of m.image_urls) allImgs.push({ url: u, b64_json: null });
+      }
+      const u = (m.params as { usage?: ApiUsage } | null)?.usage;
+      if (u) {
+        totalUsage = {
+          input_tokens: totalUsage.input_tokens + u.input_tokens,
+          output_tokens: totalUsage.output_tokens + u.output_tokens,
+          total_tokens: totalUsage.total_tokens + u.total_tokens,
+        };
+      }
+    }
+    if (allImgs.length > 0) {
+      setResults(allImgs);
+      setUsage(totalUsage);
+      const firstSrc = imageToSrc(allImgs[0], format);
+      if (firstSrc) setLastResultSrc(firstSrc);
+    }
+  }, [conversations.current, format]);
 
   // 模式切换时清理
   const handleModeChange = (newMode: "generate" | "edit" | "reasoning") => {
@@ -843,6 +865,9 @@ function SimpleGenerateView({
   };
 
   useLayoutEffect(() => {
+    // 当 activeNav === "models" 时，由 ModelPlaza 主导上报 5 个广场 shape，
+    // 这里跳过，避免两个来源相互覆盖。
+    if (activeNav === "models") return;
     const refs: RefObject<HTMLElement | null>[] = [
       sidebarRef,
       referenceCardRef,
@@ -850,7 +875,6 @@ function SimpleGenerateView({
       resultsCardRef,
       recentCardRef,
       chatPanelRef,
-      timelineRailRef,
     ];
     const measure = () => {
       const shapes = refs
@@ -873,7 +897,7 @@ function SimpleGenerateView({
       observer.disconnect();
       window.removeEventListener("resize", onResize);
     };
-  }, [onShapesChange]);
+  }, [onShapesChange, activeNav]);
 
   return (
     <main className="relative z-20 h-[calc(100vh-76px)] overflow-hidden">
@@ -963,7 +987,7 @@ function SimpleGenerateView({
         </aside>
 
         {activeNav === "models" ? (
-          <ModelPlaza />
+          <ModelPlaza onShapesChange={onShapesChange} />
         ) : (
         <div className="flex min-w-0 flex-1 flex-col gap-3">
           {/* 顶部标题（贴外、不进卡） */}
@@ -1413,44 +1437,80 @@ function SimpleGenerateView({
 
         {activeNav !== "models" && (
         <>
-        {/* 历史时间轴 —— 透明壳，玻璃质感由全屏 LiquidGlass WebGL 渲染 */}
-        <TimelineRail
-          ref={timelineRailRef}
-          state={conversations}
-          onNew={() => conversations.setCurrentId(null)}
-          onSelectConversation={() => {
-            // 切换会话时清掉本地 pending bubble（未完成的生成不跨会话）
-            setPendingBubble(null);
-          }}
-        />
         {/* 右侧 AI 对话面板 */}
         <aside
           ref={chatPanelRef}
           className="flex shrink-0 flex-col gap-3 rounded-[28px] p-4"
           style={{ width: 340 }}
         >
-          <div className="flex shrink-0 items-center justify-between">
+          <div className="relative flex shrink-0 items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="grid h-7 w-7 place-items-center rounded-full bg-accent-foxo/15 text-accent-foxo">
                 <SparkleIcon />
               </span>
               <span className="text-[13px] font-medium text-white/92">AI 助手</span>
             </div>
-            <button
-              onClick={() => conversations.setCurrentId(null)}
-              className="text-[11px] text-white/45 hover:text-white/72"
-            >
-              新对话
-            </button>
+            <div className="relative flex items-center gap-0.5">
+              <button
+                type="button"
+                onClick={() => conversations.setCurrentId(null)}
+                title="新对话"
+                aria-label="新对话"
+                className="grid h-7 w-7 place-items-center rounded-full text-white/55 transition-colors hover:bg-white/[0.06] hover:text-white/92"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                onClick={() => setHistoryOpen((v) => !v)}
+                title="历史记录"
+                aria-label="历史记录"
+                aria-expanded={historyOpen}
+                className="grid h-7 w-7 place-items-center rounded-full text-white/55 transition-colors hover:bg-white/[0.06] hover:text-white/92"
+                style={{ color: historyOpen ? "rgba(255,255,255,0.92)" : undefined, background: historyOpen ? "rgba(255,255,255,0.06)" : undefined }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="9" />
+                  <path d="M12 7v5l3 2" />
+                </svg>
+              </button>
+              {historyOpen && (
+                <HistoryDropdown
+                  items={conversations.list}
+                  currentId={conversations.currentId}
+                  loading={conversations.loadingList}
+                  onSelect={(id) => conversations.setCurrentId(id)}
+                  onRename={conversations.rename}
+                  onTogglePin={conversations.togglePin}
+                  onDelete={conversations.remove}
+                  onClose={() => setHistoryOpen(false)}
+                />
+              )}
+            </div>
           </div>
 
           {/* 消息区 */}
-          <div className="min-h-0 flex-1 overflow-y-auto rounded-[20px] border border-white/[0.04] bg-[#1e1e22] p-3 [scrollbar-color:rgba(255,255,255,0.16)_transparent] [scrollbar-width:thin] [scrollbar-gutter:stable]">
+          <div
+            ref={chatScrollRef}
+            className="min-h-0 flex-1 overflow-y-auto rounded-[20px] border border-white/[0.04] bg-[#1e1e22] p-3 [scrollbar-color:rgba(255,255,255,0.16)_transparent] [scrollbar-width:thin] [scrollbar-gutter:stable]"
+          >
             <div className="space-y-3 text-[12.5px] leading-relaxed">
               {chatMessages.map((m) => (
-                <ChatBubble key={m.id} role={m.role} pending={m.pending}>
-                  {m.text}
-                </ChatBubble>
+                // wrapper 标 data-msg-id：TimelineQuickJump 用它 query 节点并 scrollTo
+                <div key={m.id} data-msg-id={m.id}>
+                  <ChatBubble
+                    role={m.role}
+                    pending={m.pending}
+                    status={m.status}
+                    imageUrls={m.image_urls}
+                    size={m.size}
+                    onImageClick={(src) => setPreviewSrc(src)}
+                  >
+                    {m.text}
+                  </ChatBubble>
+                </div>
               ))}
             </div>
           </div>
@@ -1538,6 +1598,11 @@ function SimpleGenerateView({
             </div>
           </div>
         </aside>
+        {/* 快速跳转时间轴 —— 透明无背景，紧贴 AI 卡片右侧；tick = 当前会话内的一条 message */}
+        <TimelineQuickJump
+          messages={chatMessages.filter((m) => typeof m.id === "number")}
+          scrollContainerRef={chatScrollRef}
+        />
         </>
         )}
       </div>
@@ -1706,29 +1771,72 @@ function ChevronIcon({ direction = "right" }: { direction?: "left" | "right" }) 
 function ChatBubble({
   role,
   pending,
+  status,
+  imageUrls,
+  size,
+  onImageClick,
   children,
 }: {
   role: "ai" | "user";
   pending?: boolean;
+  status?: "done" | "pending" | "failed";
+  /** done 后的产出图：直接在 bubble 内渲染缩略图（点击放大走 onImageClick） */
+  imageUrls?: string[] | null;
+  /** 生图任务的请求 size，如 "1024x1024"；用于 done 时缩略图比例 */
+  size?: string;
+  onImageClick?: (src: string) => void;
   children: ReactNode;
 }) {
   const isUser = role === "user";
+  const isFailed = status === "failed";
+  // pending：本地占位（pending=true）或服务端 message.status='pending'
+  const showPending = !isUser && (pending || status === "pending");
+  const hasImages = !isUser && status === "done" && imageUrls && imageUrls.length > 0;
+  const aspect = parseSizeAspect(size);
+
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
-        className={`max-w-[88%] rounded-[14px] px-3 py-2 ${
+        className={`max-w-[88%] rounded-[14px] ${
           isUser
-            ? "bg-accent-foxo/14 text-white/92 ring-1 ring-inset ring-accent-foxo/30"
-            : pending
-              ? "thinking-shimmer text-white/82 ring-1 ring-inset ring-white/[0.06]"
-              : "bg-[#141418] text-white/82 ring-1 ring-inset ring-white/[0.04]"
+            ? "bg-accent-foxo/14 text-white/92 ring-1 ring-inset ring-accent-foxo/30 px-3 py-2"
+            : isFailed
+              ? "bg-[#2a1818] text-[#FF8A8A] ring-1 ring-inset ring-[#FF8A8A]/30 px-3 py-2"
+              : hasImages
+                ? "bg-[#141418] text-white/82 ring-1 ring-inset ring-white/[0.04] p-2"
+                : showPending
+                  ? "thinking-shimmer text-white/82 ring-1 ring-inset ring-white/[0.06] px-3 py-2"
+                  : "bg-[#141418] text-white/82 ring-1 ring-inset ring-white/[0.04] px-3 py-2"
         }`}
       >
-        {pending ? (
+        {showPending ? (
           <span className="flex items-center gap-2">
             <ThinkingDots />
-            <span className="thinking-text">{children}</span>
+            <span className="thinking-text">{children || "生成中"}</span>
           </span>
+        ) : hasImages ? (
+          <div className="flex flex-col gap-1.5">
+            <div className={imageUrls!.length === 1 ? "" : "grid grid-cols-2 gap-1.5"}>
+              {imageUrls!.map((u) => (
+                <button
+                  key={u}
+                  type="button"
+                  onClick={() => onImageClick?.(safeImageSrc(u))}
+                  className="block overflow-hidden rounded-[10px] ring-1 ring-inset ring-white/[0.06] transition-transform hover:scale-[1.02]"
+                  style={{ aspectRatio: aspect }}
+                >
+                  <img
+                    src={safeImageSrc(u)}
+                    alt=""
+                    className="h-full w-full object-cover"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </button>
+              ))}
+            </div>
+            {children && <div className="px-1 text-[11px] text-white/55">{children}</div>}
+          </div>
         ) : (
           children
         )}
@@ -1737,7 +1845,15 @@ function ChatBubble({
   );
 }
 
-/** Cursor 风格的"思考中"三连小圆点：交错跳动 */
+/** 把 "WxH" 或 "auto" 转成 CSS aspect-ratio 字符串 */
+function parseSizeAspect(size?: string): string {
+  if (!size || size === "auto") return "1 / 1";
+  const m = size.replace("×", "x").match(/^(\d+)x(\d+)$/);
+  if (!m) return "1 / 1";
+  return `${m[1]} / ${m[2]}`;
+}
+
+/** "思考中"三连小圆点：交错跳动 */
 function ThinkingDots() {
   return (
     <span className="inline-flex items-center gap-1">

@@ -1,15 +1,32 @@
-"""/api/images/* 路由"""
+"""/api/images/* 路由
+
+任务化生图链路（解决前端刷新丢结果的 bug）：
+  1. /generate /edit 接收 conversation_id，在事务内插入一条 status='pending' 的 ai message
+  2. asyncio.create_task 启动后台任务调上游，task 自带 db session 与请求生命周期解耦
+  3. 接口立即返回 pending message —— 前端拿到 id 即可关闭等待，开始轮询
+  4. 后台任务回写 message（done + image_urls / failed + 错误文本），同时 bump conversation.updated_at
+  5. 前端通过 GET /api/conversations/{id} 拉详情看到 status 变化
+  6. 即使前端刷新断开连接，后台任务已经脱钩仍会跑完，刷新后看到 done 的 message
+
+multipart /edit：字节在 endpoint 内同步读完后传入 task，避免 task 内访问已关闭的 stream。
+"""
 from __future__ import annotations
 
-import logging
-
 import asyncio
+import logging
+from datetime import datetime
+from typing import Any
 
 import httpx
-from fastapi import APIRouter, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import JSONResponse, Response
+from sqlalchemy import and_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
+from ..db import get_db, get_session_factory
+from ..deps import get_current_user
+from ..models import Conversation, Message, User
 from ..openai_client import (
     UpstreamError,
     UpstreamTimeout,
@@ -19,10 +36,8 @@ from ..openai_client import (
 from ..schemas import (
     ErrorDetail,
     ErrorResponse,
-    GenerateImage,
     GenerateRequest,
-    GenerateResponse,
-    GenerateUsage,
+    MessageOut,
     SegmentRequest,
 )
 from ..segment_service import fetch_image_bytes, segment_brush_mobile_sam, segment_sync
@@ -30,22 +45,169 @@ from ..segment_service import fetch_image_bytes, segment_brush_mobile_sam, segme
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/images", tags=["images"])
 
+# asyncio.create_task 仅持有 weak ref，task 可能在执行中被 GC 回收 ——
+# 导致 pending message 永远不会被 task 回写为 done，前端轮询永远拿不到结果。
+# 用 module-level set 保留强引用，task 完成后 done_callback 自动 discard。
+# 参考 Python 3.11+ asyncio 文档对 create_task 的明确警告。
+_background_tasks: set[asyncio.Task] = set()
 
-@router.post(
-    "/generate",
-    response_model=GenerateResponse,
-    responses={
-        400: {"model": ErrorResponse},
-        502: {"model": ErrorResponse},
-        504: {"model": ErrorResponse},
-    },
-)
-async def generate(req: GenerateRequest) -> JSONResponse:
-    """文本生图代理"""
+
+def _spawn_background_task(coro) -> asyncio.Task:
+    """启动后台 task 并保留强引用，避免被 GC 提前回收"""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
+# ===== helpers =====
+
+
+def _to_msg_out(m: Message) -> MessageOut:
+    return MessageOut(
+        id=m.id,
+        role=m.role,
+        text=m.text,
+        image_urls=m.image_urls,
+        params=m.params,
+        status=m.status,
+        created_at=m.created_at,
+    )
+
+
+async def _load_owned_conv(db: AsyncSession, user_id: int, conv_id: int) -> Conversation:
+    """加载属于 user 的、未软删的会话；找不到抛 404"""
+    res = await db.execute(
+        select(Conversation).where(
+            and_(
+                Conversation.id == conv_id,
+                Conversation.user_id == user_id,
+                Conversation.deleted_at.is_(None),
+            )
+        )
+    )
+    conv = res.scalar_one_or_none()
+    if conv is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"code": "conversation_not_found", "message": "会话不存在或已删除"}},
+        )
+    return conv
+
+
+async def _create_pending_ai_msg(
+    db: AsyncSession, conv_id: int, init_params: dict[str, Any]
+) -> Message:
+    """在请求 session 里写入一条 pending ai message，返回带 id 的实体"""
+    now = datetime.utcnow()
+    msg = Message(
+        conversation_id=conv_id,
+        role="ai",
+        text="生成中…",
+        image_urls=None,
+        params=init_params,
+        status="pending",
+        created_at=now,
+    )
+    db.add(msg)
+    await db.flush()  # 拿 id
+    return msg
+
+
+async def _finalize_message(
+    factory, ai_msg_id: int, conv_id: int, *, ok: bool, text: str,
+    image_urls: list[str] | None = None, params: dict[str, Any] | None = None,
+) -> None:
+    """后台 task 调上游结束后，用独立 session 把消息状态固化下来 + bump conv.updated_at"""
+    async with factory() as db:
+        try:
+            values: dict[str, Any] = {
+                "status": "done" if ok else "failed",
+                "text": text,
+            }
+            if image_urls is not None:
+                values["image_urls"] = image_urls
+            if params is not None:
+                values["params"] = params
+            await db.execute(update(Message).where(Message.id == ai_msg_id).values(**values))
+            await db.execute(
+                update(Conversation)
+                .where(Conversation.id == conv_id)
+                .values(updated_at=datetime.utcnow())
+            )
+            await db.commit()
+        except Exception:  # noqa: BLE001
+            await db.rollback()
+            logger.exception("finalize_message 写库失败 ai_msg_id=%s", ai_msg_id)
+
+
+def _parse_upstream_images(upstream_json: dict[str, Any]) -> tuple[list[str], dict[str, Any], int]:
+    """从上游响应解出 url 列表 / usage / 图片数"""
+    data_list = upstream_json.get("data", []) or []
+    urls = [item.get("url") for item in data_list if item.get("url")]
+    usage_raw = upstream_json.get("usage") or {}
+    usage = {
+        "input_tokens": int(usage_raw.get("input_tokens", 0)),
+        "output_tokens": int(usage_raw.get("output_tokens", 0)),
+        "total_tokens": int(usage_raw.get("total_tokens", 0)),
+    }
+    return urls, usage, len(data_list)
+
+
+# ===== /generate =====
+
+
+async def _run_generate_task(
+    ai_msg_id: int, conv_id: int, payload: dict[str, Any], action_label: str
+) -> None:
+    """后台任务：调上游 generate，回写 message"""
+    factory = get_session_factory()
+    try:
+        upstream_json = await call_images_generate(payload)
+    except UpstreamTimeout as e:
+        await _finalize_message(
+            factory, ai_msg_id, conv_id, ok=False, text=f"失败：上游超时 ({e})"
+        )
+        return
+    except UpstreamError as e:
+        await _finalize_message(
+            factory, ai_msg_id, conv_id, ok=False,
+            text=f"失败：upstream_error：{e}",
+        )
+        return
+    except Exception as e:  # noqa: BLE001
+        logger.exception("generate task 异常 ai_msg_id=%s", ai_msg_id)
+        await _finalize_message(
+            factory, ai_msg_id, conv_id, ok=False, text=f"失败：{e}"
+        )
+        return
+
+    urls, usage, n_imgs = _parse_upstream_images(upstream_json)
+    text = f"{action_label} {n_imgs} 张 · {usage['total_tokens']} tokens"
+    params = {
+        "model": upstream_json.get("model", payload.get("model")),
+        "usage": usage,
+        # 把请求参数也存一份方便 UI 还原
+        "request": {k: v for k, v in payload.items() if k != "prompt"},
+    }
+    await _finalize_message(
+        factory, ai_msg_id, conv_id, ok=True, text=text,
+        image_urls=urls or None, params=params,
+    )
+
+
+@router.post("/generate", response_model=MessageOut)
+async def generate(
+    req: GenerateRequest,
+    conversation_id: int = Query(..., description="目标会话 id；ai message 写入此会话"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> JSONResponse:
+    """文本生图（任务化）：
+    立即落库一条 pending ai message，启动后台 task 调上游，前端拿 message 后开始轮询。
+    """
     upstream_model = "gpt-image-2"
-
-    # 组装上游 payload（OpenAI 字段名）
-    payload: dict = {
+    payload: dict[str, Any] = {
         "model": upstream_model,
         "prompt": req.prompt,
         "size": req.size,
@@ -60,61 +222,146 @@ async def generate(req: GenerateRequest) -> JSONResponse:
     if req.output_format in {"jpeg", "webp"} and req.output_compression is not None:
         payload["output_compression"] = req.output_compression
 
+    # 鉴权 + 会话归属校验
+    conv = await _load_owned_conv(db, user.id, conversation_id)
+
+    init_params = {
+        "request": {k: v for k, v in payload.items() if k != "prompt"},
+    }
+    msg = await _create_pending_ai_msg(db, conv.id, init_params)
+    await db.commit()
+    await db.refresh(msg)
+
+    # 启动后台任务（与请求生命周期解耦；持有强引用避免被 GC）
+    _spawn_background_task(
+        _run_generate_task(msg.id, conv.id, payload, action_label="已生成")
+    )
+
+    return JSONResponse(content=_to_msg_out(msg).model_dump(mode="json"))
+
+
+# ===== /edit =====
+
+
+async def _run_edit_task(
+    ai_msg_id: int,
+    conv_id: int,
+    fields: dict[str, Any],
+    files: list[tuple[str, tuple[str, bytes, str]]],
+) -> None:
+    """后台任务：调上游 edit，回写 message"""
+    factory = get_session_factory()
     try:
-        upstream_json = await call_images_generate(payload)
+        upstream_json = await call_images_edit(fields, files)
     except UpstreamTimeout as e:
-        return JSONResponse(
-            status_code=504,
-            content=ErrorResponse(
-                error=ErrorDetail(code="timeout", message=f"上游超时：{e}")
-            ).model_dump(),
+        await _finalize_message(
+            factory, ai_msg_id, conv_id, ok=False, text=f"失败：上游超时 ({e})"
         )
+        return
     except UpstreamError as e:
-        return JSONResponse(
-            status_code=e.status if 400 <= e.status < 600 else 502,
-            content=ErrorResponse(
-                error=ErrorDetail(
-                    code="upstream_error",
-                    message=str(e),
-                    upstream_status=e.status,
-                )
-            ).model_dump(),
+        await _finalize_message(
+            factory, ai_msg_id, conv_id, ok=False,
+            text=f"失败：upstream_error：{e}",
         )
-
-    # 解析上游返回；OpenAI 的 images 返回里每项含 url 或 b64_json
-    data_list = upstream_json.get("data", []) or []
-    images = [
-        GenerateImage(
-            url=item.get("url"),
-            b64_json=item.get("b64_json"),
+        return
+    except Exception as e:  # noqa: BLE001
+        logger.exception("edit task 异常 ai_msg_id=%s", ai_msg_id)
+        await _finalize_message(
+            factory, ai_msg_id, conv_id, ok=False, text=f"失败：{e}"
         )
-        for item in data_list
-    ]
+        return
 
-    usage_raw = upstream_json.get("usage") or {}
-    usage = GenerateUsage(
-        input_tokens=int(usage_raw.get("input_tokens", 0)),
-        output_tokens=int(usage_raw.get("output_tokens", 0)),
-        total_tokens=int(usage_raw.get("total_tokens", 0)),
+    urls, usage, n_imgs = _parse_upstream_images(upstream_json)
+    text = f"已修改 {n_imgs} 张 · {usage['total_tokens']} tokens"
+    params = {
+        "mode": "edit",
+        "model": upstream_json.get("model", fields.get("model")),
+        "usage": usage,
+        "request": {k: v for k, v in fields.items() if k != "prompt"},
+    }
+    await _finalize_message(
+        factory, ai_msg_id, conv_id, ok=True, text=text,
+        image_urls=urls or None, params=params,
     )
 
-    resp = GenerateResponse(
-        images=images,
-        usage=usage,
-        model=upstream_json.get("model", req.model),
-    )
-    return JSONResponse(content=resp.model_dump())
+
+@router.post("/edit", response_model=MessageOut)
+async def edit(
+    image: list[UploadFile] = File(..., description="参考图（1~N 张）；mask 仅对齐第 1 张"),
+    mask: UploadFile = File(..., description="mask PNG"),
+    prompt: str = Form(..., min_length=1),
+    conversation_id: int = Form(..., description="目标会话 id"),
+    model: str = Form("gpt-image-2"),
+    size: str = Form("auto"),
+    quality: str = Form("low"),
+    n: int = Form(1),
+    background: str = Form("auto"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> JSONResponse:
+    """Inpainting / 多参考图编辑（任务化）：行为同 /generate"""
+    api_size = size.replace("×", "x")
+    upstream_model = "gpt-image-2"
+
+    if not image:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "validation_error", "message": "至少需要 1 张参考图"}},
+        )
+
+    # 同步读完 multipart 字节（task 内不能再访问 stream）
+    image_payloads: list[tuple[str, bytes, str]] = []
+    for idx, up in enumerate(image):
+        b = await up.read()
+        if not b:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"code": "validation_error", "message": f"image[{idx}] 为空"}},
+            )
+        image_payloads.append(
+            (up.filename or f"image-{idx}.png", b, up.content_type or "image/png")
+        )
+    mask_bytes = await mask.read()
+    if not mask_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "validation_error", "message": "mask 为空"}},
+        )
+
+    # 鉴权 + 会话归属校验
+    conv = await _load_owned_conv(db, user.id, conversation_id)
+
+    fields: dict[str, Any] = {
+        "model": upstream_model,
+        "prompt": prompt,
+        "size": api_size,
+        "quality": quality,
+        "n": str(n),
+        "background": background,
+    }
+    files: list[tuple[str, tuple[str, bytes, str]]] = [("image[]", p) for p in image_payloads]
+    files.append(("mask", ("mask.png", mask_bytes, "image/png")))
+
+    init_params = {
+        "mode": "edit",
+        "request": {k: v for k, v in fields.items() if k != "prompt"},
+    }
+    msg = await _create_pending_ai_msg(db, conv.id, init_params)
+    await db.commit()
+    await db.refresh(msg)
+
+    _spawn_background_task(_run_edit_task(msg.id, conv.id, fields, files))
+    _ = model  # 显式吸收 unused 参数避免 lint
+
+    return JSONResponse(content=_to_msg_out(msg).model_dump(mode="json"))
+
+
+# ===== 不变：proxy-image / segment / brush-cutout =====
 
 
 @router.get("/proxy-image")
 async def proxy_image(url: str = Query(..., description="上游图片 URL")) -> Response:
-    """反代上游 CDN 图片，规避前端 canvas 跨域 taint。
-
-    安全策略（开发环境）：
-    - 协议必须 https
-    - 上游响应 Content-Type 必须以 image/ 开头
-    - 单文件上限 50 MB
-    """
+    """反代上游 CDN 图片，规避前端 canvas 跨域 taint。"""
     if not url.startswith("https://"):
         return JSONResponse(
             status_code=400,
@@ -128,9 +375,7 @@ async def proxy_image(url: str = Query(..., description="上游图片 URL")) -> 
     except httpx.HTTPError as e:
         return JSONResponse(
             status_code=502,
-            content={
-                "error": {"code": "upstream_error", "message": f"拉取图片失败：{e}"}
-            },
+            content={"error": {"code": "upstream_error", "message": f"拉取图片失败：{e}"}},
         )
 
     if r.status_code >= 400:
@@ -173,8 +418,7 @@ async def proxy_image(url: str = Query(..., description="上游图片 URL")) -> 
 
 @router.post("/segment")
 async def segment(req: SegmentRequest) -> Response:
-    """ML 抠图：在用户矩形周围 ROI 扩展，rembg 显著性分割，紧凑 bbox 返回透明 PNG"""
-    # 1) 拉源图
+    """ML 抠图：在用户矩形周围 ROI 扩展，分割模型，紧凑 bbox 返回透明 PNG"""
     try:
         img_bytes, _ct = await fetch_image_bytes(req.url)
     except ValueError as e:
@@ -185,21 +429,12 @@ async def segment(req: SegmentRequest) -> Response:
     except (httpx.TimeoutException, httpx.HTTPError) as e:
         return JSONResponse(
             status_code=502,
-            content={
-                "error": {"code": "upstream_error", "message": f"拉取图片失败：{e}"}
-            },
+            content={"error": {"code": "upstream_error", "message": f"拉取图片失败：{e}"}},
         )
 
-    # 2) CPU 密集型 ML 推理放线程池，不阻塞 event loop
     try:
         png_bytes = await asyncio.to_thread(
-            segment_sync,
-            img_bytes,
-            req.x,
-            req.y,
-            req.w,
-            req.h,
-            req.padding_factor,
+            segment_sync, img_bytes, req.x, req.y, req.w, req.h, req.padding_factor,
         )
     except ValueError as e:
         return JSONResponse(
@@ -218,15 +453,11 @@ async def segment(req: SegmentRequest) -> Response:
 @router.post("/brush-cutout")
 async def brush_cutout(
     image: UploadFile = File(..., description="原图（PNG/JPEG）"),
-    mask: UploadFile = File(..., description="笔刷蒙版 PNG，alpha>0 = 用户涂抹"),
-    subject_type: str = Form("auto", description="auto|object|text（暂未启用 text 专精）"),
+    mask: UploadFile = File(..., description="笔刷蒙版 PNG"),
+    subject_type: str = Form("auto"),
 ) -> Response:
-    """笔刷 mask → 精细抠图（MobileSAM 三路 prompt：bbox + 点 + 低分 mask）。
-
-    返回：与原图同尺寸的 RGBA PNG，alpha 通道是 SAM 精细 mask；
-    前端可直接覆盖在原图上形成 PSD 分层效果（位置不偏移）。
-    """
-    _ = subject_type  # 预留：将来按 text 路由到 Hi-SAM
+    """笔刷 mask → 精细抠图（MobileSAM）"""
+    _ = subject_type
     image_bytes = await image.read()
     mask_bytes = await mask.read()
     if not image_bytes or not mask_bytes:
@@ -253,112 +484,6 @@ async def brush_cutout(
     return Response(content=png_bytes, media_type="image/png")
 
 
-@router.post(
-    "/edit",
-    response_model=GenerateResponse,
-    responses={
-        400: {"model": ErrorResponse},
-        502: {"model": ErrorResponse},
-        504: {"model": ErrorResponse},
-    },
-)
-async def edit(
-    image: list[UploadFile] = File(..., description="参考图（1~N 张）；mask 仅对齐第 1 张"),
-    mask: UploadFile = File(..., description="mask PNG，alpha=0 区域将被 AI 重画（对齐 image[0]）"),
-    prompt: str = Form(..., min_length=1),
-    model: str = Form("gpt-image-2"),
-    size: str = Form("auto"),
-    quality: str = Form("low"),
-    n: int = Form(1),
-    background: str = Form("auto"),
-) -> JSONResponse:
-    """Inpainting / 多参考图编辑：image[] + mask + prompt → 上游 /v1/images/edits → 新图。
-
-    上游 OpenAI 协议支持多张参考图（字段名 image[] 或多次 image=）；mask 仅对齐第 1 张。
-    """
-    # 1) 字符映射：UI 用 ×，API 要 x
-    api_size = size.replace("×", "x")
-
-    upstream_model = "gpt-image-2"
-
-    # 3) 读 multipart 字节
-    if not image:
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"code": "validation_error", "message": "至少需要 1 张参考图"}},
-        )
-    image_payloads: list[tuple[str, bytes, str]] = []
-    for idx, up in enumerate(image):
-        b = await up.read()
-        if not b:
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"code": "validation_error", "message": f"image[{idx}] 为空"}},
-            )
-        image_payloads.append(
-            (up.filename or f"image-{idx}.png", b, up.content_type or "image/png")
-        )
-    mask_bytes = await mask.read()
-    if not mask_bytes:
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"code": "validation_error", "message": "mask 为空"}},
-        )
-
-    # 4) 转发到上游
-    fields: dict = {
-        "model": upstream_model,
-        "prompt": prompt,
-        "size": api_size,
-        "quality": quality,
-        "n": str(n),
-        "background": background,
-    }
-    # httpx 接受 list[(name, (filename, bytes, content_type))] 来发同名多段
-    files: list[tuple[str, tuple[str, bytes, str]]] = [
-        ("image[]", p) for p in image_payloads
-    ]
-    files.append((
-        "mask",
-        ("mask.png", mask_bytes, "image/png"),
-    ))
-
-    try:
-        upstream_json = await call_images_edit(fields, files)
-    except UpstreamTimeout as e:
-        return JSONResponse(
-            status_code=504,
-            content=ErrorResponse(
-                error=ErrorDetail(code="timeout", message=f"上游超时：{e}")
-            ).model_dump(),
-        )
-    except UpstreamError as e:
-        return JSONResponse(
-            status_code=e.status if 400 <= e.status < 600 else 502,
-            content=ErrorResponse(
-                error=ErrorDetail(
-                    code="upstream_error",
-                    message=str(e),
-                    upstream_status=e.status,
-                )
-            ).model_dump(),
-        )
-
-    # 5) 解析返回（复用 generate 的形状）
-    data_list = upstream_json.get("data", []) or []
-    images = [
-        GenerateImage(url=item.get("url"), b64_json=item.get("b64_json"))
-        for item in data_list
-    ]
-    usage_raw = upstream_json.get("usage") or {}
-    usage = GenerateUsage(
-        input_tokens=int(usage_raw.get("input_tokens", 0)),
-        output_tokens=int(usage_raw.get("output_tokens", 0)),
-        total_tokens=int(usage_raw.get("total_tokens", 0)),
-    )
-    resp = GenerateResponse(
-        images=images,
-        usage=usage,
-        model=upstream_json.get("model", model),
-    )
-    return JSONResponse(content=resp.model_dump())
+# ===== 显式吸收未使用导入（为兼容旧 import 暴露空 alias） =====
+_ErrorDetail = ErrorDetail  # noqa: F841
+_ErrorResponse = ErrorResponse  # noqa: F841

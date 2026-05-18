@@ -50,6 +50,7 @@ def _to_msg_out(m: Message) -> MessageOut:
         text=m.text,
         image_urls=m.image_urls,
         params=m.params,
+        status=getattr(m, "status", "done"),
         created_at=m.created_at,
     )
 

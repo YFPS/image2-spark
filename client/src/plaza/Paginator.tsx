@@ -2,7 +2,8 @@ import type { ReactNode } from "react";
 import { ChevLeftIcon, ChevRightIcon } from "./icons";
 
 // 分页器：边界处箭头自动禁用 + opacity 弱化。
-// 当前页用电黄淡填充，非当前页走灰玻璃。
+// 当前页用 glass-hi + 1px accent-robot 外环（同 FilterBar 激活态），不用电黄。
+// 数字一律 tabular-nums。
 
 type Props = {
   page: number;
@@ -45,10 +46,10 @@ function PageBtn({
       disabled={disabled}
       onClick={onClick}
       className={
-        "grid h-8 min-w-8 place-items-center rounded-md border px-2 text-[12px] transition-colors disabled:cursor-not-allowed disabled:opacity-30 " +
+        "grid h-8 min-w-8 place-items-center rounded-md px-2 text-[12px] tabular-nums transition-colors disabled:cursor-not-allowed disabled:opacity-30 " +
         (active
-          ? "border-accent-foxo/60 bg-accent-foxo/20 text-accent-foxo"
-          : "border-white/[0.08] bg-white/[0.03] text-white/65 hover:bg-white/[0.08]")
+          ? "bg-white/[0.12] text-white/95 font-medium"
+          : "bg-white/[0.03] text-white/65 hover:bg-white/[0.08] hover:text-white/85")
       }
     >
       {children}

@@ -142,6 +142,9 @@ class TokenResponse(BaseModel):
 # ===== AI 对话历史 =====
 
 MessageRoleT = Literal["user", "ai"]
+# AI 消息异步生成的状态机：pending（后台 task 进行中）/done（已落库）/failed（上游异常）
+# user 消息恒为 done；该字段用于前端识别"生成中"占位、刷新后接管轮询
+MessageStatusT = Literal["done", "pending", "failed"]
 
 
 class MessageOut(BaseModel):
@@ -152,6 +155,7 @@ class MessageOut(BaseModel):
     text: str
     image_urls: list[str] | None = None
     params: dict[str, Any] | None = None
+    status: MessageStatusT = "done"
     created_at: datetime
 
 
