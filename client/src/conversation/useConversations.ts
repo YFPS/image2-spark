@@ -20,6 +20,7 @@ import {
 } from "../api/conversations";
 import { useAuth } from "../auth/AuthContext";
 import { AuthApiError } from "../api/auth";
+import { chooseRestoredConversationId } from "./pendingGeneration";
 
 const CACHE_PREFIX = "conv_list_cache_v1:";
 // currentId 持久化：刷新页面后回到上次正在看的会话；解决"刷新后默认变新对话"的 bug
@@ -129,6 +130,7 @@ export function useConversations(): UseConversations {
   // 用 ref 缓存最新 list，避免回调闭包旧值
   const listRef = useRef(state.list);
   listRef.current = state.list;
+  const autoRestoreAttemptedRef = useRef(false);
   // optimistic id 生成器：自减计数 + Date.now() 偏移，杜绝同毫秒撞 id
   const optimisticSeqRef = useRef(0);
 
@@ -158,10 +160,15 @@ export function useConversations(): UseConversations {
     try {
       const list = await apiList({ q: searchQ || undefined });
       setState((s) => ({ ...s, list, loadingList: false }));
+      if (!searchQ && !autoRestoreAttemptedRef.current) {
+        autoRestoreAttemptedRef.current = true;
+        const restoredId = chooseRestoredConversationId({ currentId, list });
+        if (restoredId !== currentId) setCurrentId(restoredId);
+      }
     } catch (e) {
       setState((s) => ({ ...s, loadingList: false, error: errMsg(e) }));
     }
-  }, [searchQ]);
+  }, [currentId, searchQ, setCurrentId]);
 
   // 搜索词变化时拉列表（搜索框输入加 250ms debounce，避免每个按键都打后端）
   useEffect(() => {
@@ -316,13 +323,16 @@ export function useConversations(): UseConversations {
       if (s.current?.id !== convId) return s;
       // 避免重复 attach（同 id 已存在则跳过）
       if (s.current.messages.some((x) => x.id === m.id)) return s;
+      const newCurrent: ConversationDetail = {
+        ...s.current,
+        messages: [...s.current.messages, m],
+        message_count: s.current.message_count + 1,
+        has_pending: s.current.has_pending || (m.role === "ai" && m.status === "pending"),
+      };
       return {
         ...s,
-        current: {
-          ...s.current,
-          messages: [...s.current.messages, m],
-          message_count: s.current.message_count + 1,
-        },
+        current: newCurrent,
+        list: bumpListItem(s.list, convId, newCurrent),
       };
     });
   }, []);
@@ -402,6 +412,7 @@ function toListItem(d: ConversationDetail): ConversationListItem {
     pinned: d.pinned,
     preview: d.preview,
     message_count: d.message_count,
+    has_pending: d.has_pending,
     created_at: d.created_at,
     updated_at: d.updated_at,
   };
@@ -420,6 +431,7 @@ function bumpListItem(
     pinned: cur.pinned,
     preview: cur.preview,
     message_count: cur.message_count,
+    has_pending: cur.has_pending,
     created_at: cur.created_at,
     updated_at: cur.updated_at,
   };

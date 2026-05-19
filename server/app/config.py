@@ -58,6 +58,27 @@ class Settings:
         self.login_fail_window: int = int(os.getenv("LOGIN_FAIL_WINDOW", "300"))
         self.login_lock_ttl: int = int(os.getenv("LOGIN_LOCK_TTL", "900"))
 
+        # ===== P1 安全加固：proxy-image host allowlist =====
+        # 逗号分隔的 host 列表，proxy-image 只允许反代这些 host 上的资源
+        # 留空 = 关闭白名单（仅做开发环境兜底，生产必须配）
+        raw_allow = os.getenv("PROXY_IMAGE_HOST_ALLOWLIST", "").strip()
+        self.proxy_image_host_allowlist: tuple[str, ...] = tuple(
+            h.strip().lower() for h in raw_allow.split(",") if h.strip()
+        )
+
+        # ===== P1 安全加固：全局与端点级限流 =====
+        # 全局：按 IP 每分钟最多 N 次，挡爬虫与脚本扫
+        self.rate_limit_global: str = os.getenv("RATE_LIMIT_GLOBAL", "120/minute")
+        # 生图/改图：按用户 id 限频，挡已登录用户烧 API key
+        self.rate_limit_generate: str = os.getenv("RATE_LIMIT_GENERATE", "6/minute")
+        # 抠图 ML 推理：CPU 密集，限严点
+        self.rate_limit_segment: str = os.getenv("RATE_LIMIT_SEGMENT", "12/minute")
+        # 注册：按 IP，防批量造号
+        self.rate_limit_register: str = os.getenv("RATE_LIMIT_REGISTER", "3/hour")
+
+        # 上传字节硬限（10 MB），edit / brush-cutout 单文件不可超
+        self.upload_max_bytes: int = int(os.getenv("UPLOAD_MAX_BYTES", str(10 * 1024 * 1024)))
+
         if not self.openai_api_key:
             # 不直接 raise，让健康检查仍可访问；调用时再报错
             pass

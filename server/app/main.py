@@ -9,10 +9,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.requests import Request
 from fastapi.responses import JSONResponse
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import text
 
 from .config import get_settings
 from .db import get_engine
+from .rate_limit import get_limiter
 from .redis_client import get_redis
 from .routers import auth, conversations, images
 
@@ -46,6 +49,29 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="image2", lifespan=lifespan)
+
+# 限流：先把 limiter 挂到 app.state（slowapi 约定），再装中间件
+# 装饰器在 routers/images.py 里使用，靠 limiter 共享同一实例
+limiter = get_limiter()
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+
+
+@app.exception_handler(RateLimitExceeded)
+async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """限流命中统一返回 {"error":{"code":"rate_limited","message":...}}"""
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": {
+                "code": "rate_limited",
+                "message": "请求过于频繁，请稍后再试",
+                "detail": str(exc.detail) if hasattr(exc, "detail") else None,
+            }
+        },
+        headers={"Retry-After": "60"},
+    )
+
 
 app.add_middleware(
     CORSMiddleware,

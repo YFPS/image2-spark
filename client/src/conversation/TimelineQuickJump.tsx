@@ -32,8 +32,15 @@ type Props = {
 export function TimelineQuickJump({ messages, scrollContainerRef, popoverSide = "left" }: Props) {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const [currentIdx, setCurrentIdx] = useState<number>(-1);
+  // 把最新 messages 用 ref 暴露给 effect 闭包，避免 useEffect 依赖 messages 引用导致频繁重订阅
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
 
   // 监听聊天容器 scroll：算"视口顶部最近的 message"的索引并高亮
+  // 注意：父组件可能过滤掉 greet/pending 等非 tick 消息（id 为 string）才传进来，
+  // 所以 querySelectorAll 拿到的 DOM 节点会比 messages 多。必须按 messages 的 id
+  // 精确匹配过滤，否则 currentIdx 会用 DOM 全集索引，与 tick 渲染索引错位
+  // （表现：滚到底时最后一条 tick 没高亮、selected 高亮位置串位）
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container || messages.length === 0) {
@@ -46,19 +53,30 @@ export function TimelineQuickJump({ messages, scrollContainerRef, popoverSide = 
       const c = scrollContainerRef.current;
       if (!c) return;
       const containerTop = c.getBoundingClientRect().top;
-      // 取容器顶部为参考线：找首个 bottom > 参考线的 message
-      const items = c.querySelectorAll<HTMLElement>("[data-msg-id]");
+      // 用 messages 的 id 集合过滤 DOM 节点，保证索引与 tick 渲染顺序一致
+      const wantedIds = new Set(messagesRef.current.map((m) => String(m.id)));
+      const items: HTMLElement[] = [];
+      c.querySelectorAll<HTMLElement>("[data-msg-id]").forEach((el) => {
+        if (wantedIds.has(el.dataset.msgId ?? "")) items.push(el);
+      });
+      // 已经滚到底（含 1px 容差）：强制高亮最后一条，匹配"看到最新消息=最后 tick 亮"
+      // 这要先于"首个 bottom > 顶部"判断，否则在视口内永远命中视口顶端那条
+      const atBottom = c.scrollTop + c.clientHeight >= c.scrollHeight - 1;
       let foundIdx = -1;
-      for (let i = 0; i < items.length; i++) {
-        const r = items[i].getBoundingClientRect();
-        if (r.bottom > containerTop + 4) {
-          foundIdx = i;
-          break;
-        }
-      }
-      // 全滚到底：高亮最后一条
-      if (foundIdx === -1 && items.length > 0) {
+      if (atBottom && items.length > 0) {
         foundIdx = items.length - 1;
+      } else {
+        for (let i = 0; i < items.length; i++) {
+          const r = items[i].getBoundingClientRect();
+          if (r.bottom > containerTop + 4) {
+            foundIdx = i;
+            break;
+          }
+        }
+        // 兜底：全部消息都在视口上方（一般不会发生）
+        if (foundIdx === -1 && items.length > 0) {
+          foundIdx = items.length - 1;
+        }
       }
       setCurrentIdx(foundIdx);
     };
@@ -85,8 +103,12 @@ export function TimelineQuickJump({ messages, scrollContainerRef, popoverSide = 
     if (!c) return;
     const target = c.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(String(messages[idx].id))}"]`);
     if (target) {
-      // 用 scrollTo 比 scrollIntoView 更稳：避免 smooth 把整个页面也滚动
-      const offset = target.offsetTop - 4;
+      // 用 getBoundingClientRect 算容器内相对偏移：target.offsetTop 取决于最近的
+      // positioned ancestor，容器没显式 position 时 offsetTop 会算到外层（甚至 body），
+      // 导致 scrollTo 的值远超容器 scrollHeight 被 clamp 到底，目标消息被挡在视口外。
+      const targetRect = target.getBoundingClientRect();
+      const containerRect = c.getBoundingClientRect();
+      const offset = c.scrollTop + targetRect.top - containerRect.top - 4;
       c.scrollTo({ top: offset, behavior: "smooth" });
     }
   };

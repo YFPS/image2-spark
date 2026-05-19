@@ -176,6 +176,7 @@ export async function editImage(
 /**
  * 调后端笔刷抠图（MobileSAM mask-prompt）：用户涂粗略区，模型沿真实主体边缘精化。
  * 返回与原图同尺寸的 RGBA PNG（alpha 为精细 mask），便于前端原位叠加做 PSD 分层。
+ * P1 起需鉴权：用 authFetch 自动附 Bearer
  */
 export async function brushCutout(req: {
   imageBlob: Blob;
@@ -186,23 +187,29 @@ export async function brushCutout(req: {
   form.append("image", req.imageBlob, "image.png");
   form.append("mask", req.maskBlob, "mask.png");
   if (req.subjectType) form.append("subject_type", req.subjectType);
-  const res = await fetch("/api/images/brush-cutout", { method: "POST", body: form });
+  const res = await authFetch("/api/images/brush-cutout", { method: "POST", body: form });
   if (!res.ok) {
     let apiError: ApiError = { code: "http_error", message: `HTTP ${res.status}` };
     try {
       const j = await res.json();
       if (j.error) apiError = j.error;
+      else if (j.detail?.error) apiError = j.detail.error;
     } catch {
       /* 忽略 */
+    }
+    // 429 友好文案补全
+    if (res.status === 429 && !apiError.message) {
+      apiError = { code: "rate_limited", message: "操作过于频繁，请稍后再试" };
     }
     throw new GenerateError(apiError);
   }
   return await res.blob();
 }
 
-/** 调后端 rembg 抠图，返回带透明背景的 PNG Blob */
+/** 调后端 ML 抠图，返回带透明背景的 PNG Blob
+ *  P1 起需鉴权：用 authFetch 自动附 Bearer */
 export async function segmentImage(req: SegmentRequest): Promise<Blob> {
-  const res = await fetch("/api/images/segment", {
+  const res = await authFetch("/api/images/segment", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
@@ -212,8 +219,12 @@ export async function segmentImage(req: SegmentRequest): Promise<Blob> {
     try {
       const j = await res.json();
       if (j.error) apiError = j.error;
+      else if (j.detail?.error) apiError = j.detail.error;
     } catch {
       /* 忽略 */
+    }
+    if (res.status === 429 && !apiError.message) {
+      apiError = { code: "rate_limited", message: "操作过于频繁，请稍后再试" };
     }
     throw new GenerateError(apiError);
   }

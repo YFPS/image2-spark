@@ -9,16 +9,22 @@
   6. 即使前端刷新断开连接，后台任务已经脱钩仍会跑完，刷新后看到 done 的 message
 
 multipart /edit：字节在 endpoint 内同步读完后传入 task，避免 task 内访问已关闭的 stream。
+
+注意：此模块**不能加 `from __future__ import annotations`**。
+slowapi 的 @limiter.limit 装饰器用 functools.wraps 但保留的 __globals__ 是 slowapi 模块的，
+pydantic 在 FastAPI 路由 schema 生成时去 resolve "GenerateRequest" 字符串注解会找不到名字，
+导致启动崩溃（pydantic.errors.PydanticUndefinedAnnotation）。
+Python 3.13 已原生支持 list[X] / X | Y 语法，不需要 future。
 """
-from __future__ import annotations
 
 import asyncio
 import logging
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +39,7 @@ from ..openai_client import (
     call_images_edit,
     call_images_generate,
 )
+from ..rate_limit import get_limiter, user_id_key
 from ..schemas import (
     ErrorDetail,
     ErrorResponse,
@@ -41,6 +48,8 @@ from ..schemas import (
     SegmentRequest,
 )
 from ..segment_service import fetch_image_bytes, segment_brush_mobile_sam, segment_sync
+
+limiter = get_limiter()
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/images", tags=["images"])
@@ -141,10 +150,20 @@ async def _finalize_message(
             logger.exception("finalize_message 写库失败 ai_msg_id=%s", ai_msg_id)
 
 
-def _parse_upstream_images(upstream_json: dict[str, Any]) -> tuple[list[str], dict[str, Any], int]:
+def _parse_upstream_images(
+    upstream_json: dict[str, Any], output_format: str = "png"
+) -> tuple[list[str], dict[str, Any], int]:
     """从上游响应解出 url 列表 / usage / 图片数"""
     data_list = upstream_json.get("data", []) or []
-    urls = [item.get("url") for item in data_list if item.get("url")]
+    urls: list[str] = []
+    for item in data_list:
+        url = item.get("url")
+        if url:
+            urls.append(url)
+            continue
+        b64 = item.get("b64_json")
+        if b64:
+            urls.append(f"data:image/{output_format};base64,{b64}")
     usage_raw = upstream_json.get("usage") or {}
     usage = {
         "input_tokens": int(usage_raw.get("input_tokens", 0)),
@@ -182,7 +201,9 @@ async def _run_generate_task(
         )
         return
 
-    urls, usage, n_imgs = _parse_upstream_images(upstream_json)
+    urls, usage, n_imgs = _parse_upstream_images(
+        upstream_json, output_format=str(payload.get("output_format") or "png")
+    )
     text = f"{action_label} {n_imgs} 张 · {usage['total_tokens']} tokens"
     params = {
         "model": upstream_json.get("model", payload.get("model")),
@@ -197,7 +218,9 @@ async def _run_generate_task(
 
 
 @router.post("/generate", response_model=MessageOut)
+@limiter.limit(lambda: get_settings().rate_limit_generate, key_func=user_id_key)
 async def generate(
+    request: Request,  # slowapi 装饰器要求第一个参数能拿到 Request
     req: GenerateRequest,
     conversation_id: int = Query(..., description="目标会话 id；ai message 写入此会话"),
     user: User = Depends(get_current_user),
@@ -271,7 +294,9 @@ async def _run_edit_task(
         )
         return
 
-    urls, usage, n_imgs = _parse_upstream_images(upstream_json)
+    urls, usage, n_imgs = _parse_upstream_images(
+        upstream_json, output_format=str(fields.get("output_format") or "png")
+    )
     text = f"已修改 {n_imgs} 张 · {usage['total_tokens']} tokens"
     params = {
         "mode": "edit",
@@ -286,7 +311,9 @@ async def _run_edit_task(
 
 
 @router.post("/edit", response_model=MessageOut)
+@limiter.limit(lambda: get_settings().rate_limit_generate, key_func=user_id_key)
 async def edit(
+    request: Request,
     image: list[UploadFile] = File(..., description="参考图（1~N 张）；mask 仅对齐第 1 张"),
     mask: UploadFile = File(..., description="mask PNG"),
     prompt: str = Form(..., min_length=1),
@@ -310,6 +337,8 @@ async def edit(
         )
 
     # 同步读完 multipart 字节（task 内不能再访问 stream）
+    settings = get_settings()
+    max_bytes = settings.upload_max_bytes
     image_payloads: list[tuple[str, bytes, str]] = []
     for idx, up in enumerate(image):
         b = await up.read()
@@ -317,6 +346,16 @@ async def edit(
             raise HTTPException(
                 status_code=400,
                 detail={"error": {"code": "validation_error", "message": f"image[{idx}] 为空"}},
+            )
+        if len(b) > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "error": {
+                        "code": "file_too_large",
+                        "message": f"image[{idx}] 超出 {max_bytes // (1024*1024)} MB 上限",
+                    }
+                },
             )
         image_payloads.append(
             (up.filename or f"image-{idx}.png", b, up.content_type or "image/png")
@@ -326,6 +365,16 @@ async def edit(
         raise HTTPException(
             status_code=400,
             detail={"error": {"code": "validation_error", "message": "mask 为空"}},
+        )
+    if len(mask_bytes) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error": {
+                    "code": "file_too_large",
+                    "message": f"mask 超出 {max_bytes // (1024*1024)} MB 上限",
+                }
+            },
         )
 
     # 鉴权 + 会话归属校验
@@ -360,15 +409,54 @@ async def edit(
 
 
 @router.get("/proxy-image")
-async def proxy_image(url: str = Query(..., description="上游图片 URL")) -> Response:
-    """反代上游 CDN 图片，规避前端 canvas 跨域 taint。"""
+async def proxy_image(
+    request: Request,
+    url: str = Query(..., description="上游图片 URL"),
+) -> Response:
+    """反代上游 CDN 图片，规避前端 canvas 跨域 taint。
+
+    无鉴权（要支持 <img src> 直接用），但限制 host：
+    - 仅 https
+    - host 必须在 PROXY_IMAGE_HOST_ALLOWLIST 内（生产必须配；为空时只允许 OPENAI_BASE_URL 所在 host）
+    - 限流由全局 IP rate_limit_global 覆盖（120/分钟）
+    """
+    settings = get_settings()
     if not url.startswith("https://"):
         return JSONResponse(
             status_code=400,
             content={"error": {"code": "validation_error", "message": "仅支持 https URL"}},
         )
 
-    settings = get_settings()
+    # host 白名单检查
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "validation_error", "message": "URL 解析失败"}},
+        )
+    if not host:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "validation_error", "message": "URL 缺少 host"}},
+        )
+
+    # 允许的 host：env 配置 + OPENAI_BASE_URL 的 host 兜底
+    allow = set(settings.proxy_image_host_allowlist)
+    upstream_host = (urlparse(settings.openai_base_url).hostname or "").lower()
+    if upstream_host:
+        allow.add(upstream_host)
+    if allow and host not in allow:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": {
+                    "code": "host_not_allowed",
+                    "message": f"host '{host}' 不在反代白名单内",
+                }
+            },
+        )
+
     try:
         async with httpx.AsyncClient(timeout=settings.openai_timeout) as client:
             r = await client.get(url)
@@ -417,8 +505,14 @@ async def proxy_image(url: str = Query(..., description="上游图片 URL")) -> 
 
 
 @router.post("/segment")
-async def segment(req: SegmentRequest) -> Response:
+@limiter.limit(lambda: get_settings().rate_limit_segment, key_func=user_id_key)
+async def segment(
+    request: Request,
+    req: SegmentRequest,
+    user: User = Depends(get_current_user),
+) -> Response:
     """ML 抠图：在用户矩形周围 ROI 扩展，分割模型，紧凑 bbox 返回透明 PNG"""
+    _ = user  # 仅鉴权用
     try:
         img_bytes, _ct = await fetch_image_bytes(req.url)
     except ValueError as e:
@@ -451,19 +545,34 @@ async def segment(req: SegmentRequest) -> Response:
 
 
 @router.post("/brush-cutout")
+@limiter.limit(lambda: get_settings().rate_limit_segment, key_func=user_id_key)
 async def brush_cutout(
+    request: Request,
     image: UploadFile = File(..., description="原图（PNG/JPEG）"),
     mask: UploadFile = File(..., description="笔刷蒙版 PNG"),
     subject_type: str = Form("auto"),
+    user: User = Depends(get_current_user),
 ) -> Response:
     """笔刷 mask → 精细抠图（MobileSAM）"""
-    _ = subject_type
+    _ = subject_type, user
+    settings = get_settings()
+    max_bytes = settings.upload_max_bytes
     image_bytes = await image.read()
     mask_bytes = await mask.read()
     if not image_bytes or not mask_bytes:
         return JSONResponse(
             status_code=400,
             content={"error": {"code": "validation_error", "message": "image 或 mask 为空"}},
+        )
+    if len(image_bytes) > max_bytes or len(mask_bytes) > max_bytes:
+        return JSONResponse(
+            status_code=413,
+            content={
+                "error": {
+                    "code": "file_too_large",
+                    "message": f"上传超过 {max_bytes // (1024*1024)} MB 上限",
+                }
+            },
         )
 
     try:

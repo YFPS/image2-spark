@@ -167,6 +167,7 @@ class ConversationListOut(BaseModel):
     pinned: bool
     preview: str  # 首条 user.text 前 60 字
     message_count: int
+    has_pending: bool = False
     created_at: datetime
     updated_at: datetime
 

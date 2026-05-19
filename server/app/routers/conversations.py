@@ -91,6 +91,16 @@ async def _build_list_out(db: AsyncSession, conv: Conversation) -> ConversationL
         select(func.count(Message.id)).where(Message.conversation_id == conv.id)
     )
     cnt = int(cnt_res.scalar_one() or 0)
+    pending_res = await db.execute(
+        select(func.count(Message.id)).where(
+            and_(
+                Message.conversation_id == conv.id,
+                Message.role == "ai",
+                Message.status == "pending",
+            )
+        )
+    )
+    has_pending = int(pending_res.scalar_one() or 0) > 0
 
     return ConversationListOut(
         id=conv.id,
@@ -98,6 +108,7 @@ async def _build_list_out(db: AsyncSession, conv: Conversation) -> ConversationL
         pinned=conv.pinned,
         preview=preview,
         message_count=cnt,
+        has_pending=has_pending,
         created_at=conv.created_at,
         updated_at=conv.updated_at,
     )
@@ -182,6 +193,7 @@ async def create_conversation(
         pinned=conv.pinned,
         preview="",
         message_count=0,
+        has_pending=False,
         created_at=conv.created_at,
         updated_at=conv.updated_at,
         messages=[],

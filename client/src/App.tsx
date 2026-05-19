@@ -37,6 +37,8 @@ import { useAuth } from "./auth/AuthContext";
 import { useConversations } from "./conversation/useConversations";
 import { HistoryDropdown } from "./conversation/HistoryDropdown";
 import { TimelineQuickJump } from "./conversation/TimelineQuickJump";
+import { conversationHasPendingGeneration } from "./conversation/pendingGeneration";
+import { extractConversationResults } from "./conversation/conversationResults";
 
 // 角色 → 侧边栏副标显示
 const ROLE_LABEL: Record<"admin" | "user" | "paid", string> = {
@@ -687,13 +689,15 @@ function SimpleGenerateView({
   // 分辨率行是否禁用
   const resolutionDisabled = ratio === "auto" || ratio === "custom";
 
+  const hasServerPending = conversationHasPendingGeneration(conversations.current);
+  const isGenerating = loading || hasServerPending;
   const canGenerate =
-    !loading && (ratio !== "custom" || customSizeError == null) && chatInput.trim().length > 0
+    !isGenerating && (ratio !== "custom" || customSizeError == null) && chatInput.trim().length > 0
     && (mode !== "edit" || lastResultSrc != null);
 
   const handleGenerate = async () => {
     const prompt = chatInput.trim();
-    if (!prompt || loading) return;
+    if (!prompt || isGenerating) return;
 
     // 确保有一个 conversation：没有就立刻在服务端创建一个空 session
     let convId = conversations.currentId;
@@ -715,14 +719,18 @@ function SimpleGenerateView({
       return;
     }
     const apiSize = (effectiveSize ?? "auto").toString();
-    // 先把 user message 写入服务端（同步乐观更新到本地）
-    void conversations.appendMessage(convId, { role: "user", text: prompt });
-    // 临时本地占位：发到拿 pending message 那 200ms 内提供反馈，attach 后清除
-    setPendingBubble({ id: "pending-local", role: "ai", text: "生成中", pending: true });
     setChatInput("");
+    // 发送消息后自动滚动到最新消息位置
+    requestAnimationFrame(() => {
+      const el = chatScrollRef.current;
+      if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    });
     setLoading(true);
     setErrorMsg(null);
+    setPendingBubble({ id: "pending-local", role: "ai", text: "提交中…", pending: true });
     try {
+      // 先确认 user message 已落库；刷新恢复时，服务端历史不会缺 prompt。
+      await conversations.appendMessage(convId, { role: "user", text: prompt });
       const count = Math.max(1, Number(n));
       if (mode === "edit") {
         // Edit 模式：优先用 refImages（多图），否则降级到上一次生成的图
@@ -809,54 +817,14 @@ function SimpleGenerateView({
     }
   };
 
-  // 监听 current.messages 中 pending → done 的 ai message：提取 image_urls / usage 更新右栏 UI state
-  // 切换会话时重置 seen 集合，避免误把"切回历史会话"中的旧 done 当作新生成结果触发
-  const seenDoneAiRef = useRef<{ convId: number | null; ids: Set<number> }>({
-    convId: null,
-    ids: new Set(),
-  });
+  // 从当前会话的最新一轮 user prompt 后面的 done AI 消息恢复预览区。
+  // 这让刷新后已完成的任务也能填充预览，而不是只依赖 pending → done 的瞬时变化。
   useEffect(() => {
-    const cur = conversations.current;
-    if (!cur) return;
-    if (seenDoneAiRef.current.convId !== cur.id) {
-      seenDoneAiRef.current = {
-        convId: cur.id,
-        ids: new Set(
-          cur.messages
-            .filter((m) => m.role === "ai" && m.status === "done")
-            .map((m) => m.id),
-        ),
-      };
-      return;
-    }
-    const newDone = cur.messages.filter(
-      (m) => m.role === "ai" && m.status === "done" && !seenDoneAiRef.current.ids.has(m.id),
-    );
-    if (newDone.length === 0) return;
-    for (const m of newDone) seenDoneAiRef.current.ids.add(m.id);
-
-    // 合并新 done 的 image_urls + usage，更新右侧 results 区
-    const allImgs: ApiImage[] = [];
-    let totalUsage: ApiUsage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
-    for (const m of newDone) {
-      if (m.image_urls) {
-        for (const u of m.image_urls) allImgs.push({ url: u, b64_json: null });
-      }
-      const u = (m.params as { usage?: ApiUsage } | null)?.usage;
-      if (u) {
-        totalUsage = {
-          input_tokens: totalUsage.input_tokens + u.input_tokens,
-          output_tokens: totalUsage.output_tokens + u.output_tokens,
-          total_tokens: totalUsage.total_tokens + u.total_tokens,
-        };
-      }
-    }
-    if (allImgs.length > 0) {
-      setResults(allImgs);
-      setUsage(totalUsage);
-      const firstSrc = imageToSrc(allImgs[0], format);
-      if (firstSrc) setLastResultSrc(firstSrc);
-    }
+    const { images, usage } = extractConversationResults(conversations.current);
+    setResults(images);
+    setUsage(usage);
+    const firstSrc = images[0] ? imageToSrc(images[0], format) : null;
+    if (firstSrc) setLastResultSrc(firstSrc);
   }, [conversations.current, format]);
 
   // 模式切换时清理
@@ -1375,7 +1343,7 @@ function SimpleGenerateView({
             </div>
 
             <div className="min-h-0 flex-1">
-              {loading ? (
+              {isGenerating ? (
                 <div className="grid h-full place-items-center rounded-[20px] border border-white/[0.04] bg-[#111114]">
                   <div className="flex flex-col items-center gap-3 text-white/55">
                     <Spinner />
@@ -1576,7 +1544,7 @@ function SimpleGenerateView({
                   }
                 }}
                 placeholder={
-                  loading
+                  isGenerating
                     ? "生成中…"
                     : mode === "edit"
                       ? "描述你想如何修改图片，回车修改"
@@ -1584,16 +1552,16 @@ function SimpleGenerateView({
                         ? "描述你想生成的画面（思考模式），回车出图"
                         : "描述你想生成的画面，回车出图"
                 }
-                disabled={loading}
+                disabled={isGenerating}
                 className="min-w-0 flex-1 bg-transparent text-[13px] text-white/90 placeholder:text-white/32 focus:outline-none disabled:opacity-50"
               />
               <button
                 onClick={handleGenerate}
                 disabled={!canGenerate}
-                title={canGenerate ? "出图" : loading ? "生成中" : "输入提示词后回车"}
+                title={canGenerate ? "出图" : isGenerating ? "生成中" : "输入提示词后回车"}
                 className="grid h-8 w-8 place-items-center rounded-full bg-accent-foxo text-[#0D0D0D] disabled:opacity-40"
               >
-                {loading ? <Spinner small /> : <SendIcon />}
+                {isGenerating ? <Spinner small /> : <SendIcon />}
               </button>
             </div>
           </div>

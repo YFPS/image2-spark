@@ -22,6 +22,7 @@ export type ConversationListItem = {
   pinned: boolean;
   preview: string;
   message_count: number;
+  has_pending: boolean;
   created_at: string;
   updated_at: string;
 };
