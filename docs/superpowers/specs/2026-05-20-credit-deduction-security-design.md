@@ -52,7 +52,7 @@
 
 邮箱验证上线前，生产环境不应注册即发放可消费积分。
 
-配置建议：
+生产配置要求：
 
 ```env
 SIGNUP_BONUS_CREDITS=0
@@ -88,12 +88,29 @@ SIGNUP_BONUS_CREDITS=0
 CREDIT_PRICE_VERSION = "2026-05-20.v1"
 ```
 
-建议初始规则：
+初始计价规则必须固定在后端，作为 `2026-05-20.v1` 价格版本的一部分：
+
+| 维度 | 取值 | 计价 |
+|---|---|---|
+| quality | `auto` / `low` | `1` |
+| quality | `medium` | `2` |
+| quality | `high` | `4` |
+| size | `auto` 或总像素 `<= 1,310,720` | `×1` |
+| size | 总像素 `1,310,721..4,194,304` | `×2` |
+| size | 总像素 `4,194,305..8,294,400` | `×4` |
+| reasoning | `false` | `×1` |
+| reasoning | `true` | `×1.5` |
+
+`unit_price = quality_price * size_multiplier * reasoning_multiplier`。
+
+本版本中，`model`、`background`、`output_format`、`output_compression`、`moderation` 不改变积分价格，但必须进入 `request_snapshot`，方便未来价格版本调整时审计历史请求。
+
+扣费公式：
 
 | 操作 | 规则 |
 |---|---|
-| generate | `ceil(n * unit_price(quality, size, reasoning))` |
-| edit | `ceil(n * unit_price(quality, size, reasoning) * 1.2)` |
+| generate | `max(1, ceil(n * unit_price))` |
+| edit | `max(1, ceil(n * unit_price * 1.2))` |
 
 最小扣费为 1 积分。`auto` 尺寸按默认 1K 档计价；如果未来上游返回实际成本，再进入“预授权上限 + 成功后差额退款”模式。
 
@@ -119,13 +136,13 @@ Idempotency-Key: <client-generated-uuid>
 约束：
 
 - 长度 16 到 128。
-- 建议 UUID v4。
+- 客户端默认生成 UUID v4；服务端只校验长度与安全字符集，不强依赖 UUID 版本。
 - 同一用户下唯一。
 - 保存 TTL 至少 24 小时；数据库记录保留更久，用于审计。
 
 ### 7.2 成功响应
 
-请求创建任务成功后返回 `202 Accepted` 或继续使用当前 `200`。为了减少前端改动，可以先保留 `200`，响应体扩展：
+本期继续使用当前 `200` 状态码，减少前端改动；响应体扩展：
 
 ```json
 {
@@ -257,6 +274,7 @@ CREATE TABLE image_jobs (
   attempt_count INT NOT NULL DEFAULT 0,
   locked_by VARCHAR(64) NULL,
   locked_at DATETIME NULL,
+  upstream_dispatched_at DATETIME NULL,
   next_retry_at DATETIME NULL,
   error_code VARCHAR(64) NULL,
   error_message VARCHAR(255) NULL,
@@ -272,15 +290,16 @@ CREATE TABLE image_jobs (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 ```
 
-`request_payload` 不保存原始图片字节。`edit` 的文件字节仍由当前请求内传入 worker 时处理；如果要支持重启后完整恢复 edit job，后续需要先把上传文件落对象存储或本地私有存储，再在 `request_payload` 保存引用。
+`request_payload` 不保存原始图片字节。`generate` 只保存规范化后的请求字段；`edit` 必须先把上传的原图与 mask 写入私有临时存储，再在 `request_payload` 保存引用。
 
-本期高标准目标建议同步实现临时文件持久化：
+本期必须同步实现临时文件持久化，否则无法满足“服务重启后 queued job 可继续处理”的验收标准：
 
 - 上传原图与 mask 先保存到私有目录或对象存储。
 - 路径或 object key 写入 `image_jobs.request_payload`。
-- worker 成功、失败退款或过期后清理文件。
-
-否则 `/edit` 在进程重启后只能进入 `needs_review` 并人工退款，恢复能力不完整。
+- 开发默认私有本地目录为 `server/storage/image-jobs/<job_id>/`，生产可替换为对象存储。
+- 文件引用必须包含 `kind`、`filename`、`content_type`、`size_bytes`、`sha256`、`storage_key`。
+- worker 成功、失败退款、进入 `needs_review` 后人工处理完成，或文件超过保留期后清理文件。
+- 如果文件持久化失败，`/edit` 请求必须在扣费事务前失败，返回 `400 invalid_image_params` 或 `500 billing_invariant_error`，不得创建 message/job，也不得扣费。
 
 ## 9. 扣费事务
 
@@ -334,6 +353,8 @@ FOR UPDATE SKIP LOCKED;
 - `locked_at=NOW()`
 - `attempt_count=attempt_count+1`
 
+worker 真正发起上游网络请求前，必须先持久化 `upstream_dispatched_at=NOW()` 并提交。该字段是崩溃恢复边界：为空表示尚未产生上游成本，可以重试；非空表示结果未知时必须进入人工复核。
+
 状态转换：
 
 | 当前 | 事件 | 下一状态 |
@@ -377,7 +398,8 @@ FOR UPDATE SKIP LOCKED;
 | 上游 moderation 拒绝 | 是 | 先按用户友好口径全额退 |
 | 上游 5xx | 是 | 明确未成功时退款 |
 | 上游超时，无法确认是否生成 | 否，进入 `needs_review` | 避免上游已产生成本但本地退款 |
-| worker 崩溃 | 视阶段决定 | 未发上游可重试；已发未知则复核 |
+| worker 崩溃且 `upstream_dispatched_at IS NULL` | 是，重回 `queued` | 请求尚未发给上游，可安全重试 |
+| worker 崩溃且 `upstream_dispatched_at IS NOT NULL` | 否，进入 `needs_review` | 请求可能已发给上游，避免本地自动退款 |
 
 ## 12. 参数收口
 
@@ -390,10 +412,10 @@ FOR UPDATE SKIP LOCKED;
 - `size`: `auto` 或合法 `WxH`
 - `background`: `auto|opaque`
 - `model`: 忽略前端传入或限制为后端白名单
-- 上传图片数量上限，例如 4 张
+- 上传图片数量上限为 4 张
 - 单文件大小上限沿用 `UPLOAD_MAX_BYTES`
 - 校验真实图片格式和像素总量
-- mask 必须为 PNG，尺寸应与首张参考图对齐或可被明确转换
+- mask 必须为 PNG，尺寸必须与首张参考图一致；不一致返回 `400 invalid_image_params`
 
 计价必须在参数收口之后执行。
 
@@ -401,14 +423,14 @@ FOR UPDATE SKIP LOCKED;
 
 保留已有 slowapi 限流，同时新增成本维度限制。
 
-建议规则：
+初始风控规则：
 
 | 维度 | 初始值 |
 |---|---|
 | 单用户 generate/edit | 6 次/分钟 |
 | 单用户 pending job | 2 个 |
 | 单用户每小时积分消耗 | 60 积分 |
-| 单 IP 注册 | 邮箱上线前尽量低，保留 3 次/小时 |
+| 单 IP 注册 | 3 次/小时 |
 | 单 IP generate/edit | 30 次/小时 |
 | 单用户连续失败 job | 5 次后短暂冷却 |
 
@@ -499,4 +521,3 @@ FOR UPDATE SKIP LOCKED;
 - 每日对账能证明 `users.credits` 与流水总和一致。
 - 生产后端端口不可公网直连。
 - 邮箱验证未上线时，新注册账号不会自动得到可消费积分。
-
