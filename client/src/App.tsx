@@ -1183,7 +1183,7 @@ function SimpleGenerateView({
                     )}
                   </div>
 
-                  <div className="relative z-10 mt-5 grid grid-cols-5 gap-2 transition-transform duration-200 ease-out group-hover:-translate-y-1.5">
+                  <div className="relative z-10 mt-5 grid grid-cols-5 gap-x-2 gap-y-5 pt-3 transition-transform duration-200 ease-out group-hover:-translate-y-1.5">
                     {foldedRefImages.length === 0 && (
                       <button
                         title="添加参考图（支持多选）"
@@ -1219,7 +1219,7 @@ function SimpleGenerateView({
                             }}
                             title="设为主图（涂抹将作用于主图）"
                             aria-label="设为主图"
-                            className="absolute -top-2.5 left-1/2 z-20 -translate-x-1/2 rounded-full bg-accent-foxo px-2 py-0.5 text-[9px] font-semibold leading-none text-[#0D0D0D] shadow-[0_2px_8px_rgba(247,200,11,0.4)] ring-1 ring-accent-foxo/40 transition-transform hover:scale-105 hover:bg-accent-foxo/90"
+                            className="absolute left-1/2 top-0 z-20 -translate-x-1/2 -translate-y-[110%] whitespace-nowrap rounded-full bg-accent-foxo px-2 py-0.5 text-[9px] font-semibold leading-none text-[#0D0D0D] shadow-[0_2px_8px_rgba(247,200,11,0.4)] ring-1 ring-accent-foxo/40 transition-transform hover:scale-105 hover:bg-accent-foxo/90"
                           >
                             设为主图
                           </button>
