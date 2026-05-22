@@ -980,8 +980,8 @@ function SimpleGenerateView({
         {/* 左侧导航栏（可展开） */}
         <aside
           ref={sidebarRef}
-          className="flex shrink-0 flex-col rounded-[28px] px-2.5 py-4 transition-[width] duration-200"
-          style={{ width: sidebarExpanded ? 220 : 72 }}
+          className="flex shrink-0 flex-col overflow-hidden rounded-[28px] px-2.5 py-4 transition-[width] duration-200"
+          style={{ width: sidebarExpanded ? 220 : 80 }}
         >
           {/* Logo 行 */}
           <div
@@ -995,14 +995,14 @@ function SimpleGenerateView({
                 <img
                   src="/logo2.png"
                   alt="Mona"
-                  className="h-16 w-auto shrink-0 select-none"
+                  className="h-[88px] w-[132px] max-w-none shrink-0 select-none"
                   draggable={false}
                 />
               ) : (
                 <img
                   src="/logo.png"
                   alt="Mona"
-                  className="h-12 w-12 shrink-0 select-none"
+                  className="h-[58px] w-[58px] max-w-none shrink-0 select-none"
                   draggable={false}
                 />
               )}
@@ -1171,12 +1171,12 @@ function SimpleGenerateView({
                     )}
                   </div>
 
-                  <div className="relative z-10 mt-5 flex h-[76px] items-center gap-2 pl-1 transition-transform duration-200 ease-out group-hover:-translate-y-1.5">
+                  <div className="relative z-10 mt-5 grid grid-cols-5 gap-2 transition-transform duration-200 ease-out group-hover:-translate-y-1.5">
                     {foldedRefImages.length === 0 && (
                       <button
                         title="添加参考图（支持多选）"
                         onClick={() => refFileInputRef.current?.click()}
-                        className="flex h-[68px] w-full items-center gap-3 rounded-[14px] border border-dashed border-white/[0.18] bg-white/[0.025] px-4 text-left transition-all hover:border-accent-foxo/70 hover:bg-accent-foxo/[0.04]"
+                        className="col-span-5 flex h-[68px] w-full items-center gap-3 rounded-[14px] border border-dashed border-white/[0.18] bg-white/[0.025] px-4 text-left transition-all hover:border-accent-foxo/70 hover:bg-accent-foxo/[0.04]"
                       >
                         <span className="grid h-11 w-11 place-items-center rounded-[12px] bg-white/[0.05] text-[24px] leading-none text-white/[0.58]">
                           +
@@ -1188,12 +1188,19 @@ function SimpleGenerateView({
                       </button>
                     )}
 
-                    {foldedRefImages.map((item, idx) => (
+                    {foldedRefImages.map((item, idx) => {
+                      const isMain = idx === 0;
+                      const isMulti = refImages.length > 1;
+                      return (
                       <div
                         key={item.id}
                         title="点击放大预览"
                         onClick={() => setPreviewSrc(item.dataURL)}
-                        className="group/thumb relative h-[72px] w-[54px] shrink-0 cursor-zoom-in overflow-hidden rounded-[10px] border border-white/[0.14] bg-[#141418] shadow-[0_14px_28px_-6px_rgba(0,0,0,0.55),0_4px_10px_rgba(0,0,0,0.38),inset_0_0_0_1px_rgba(255,255,255,0.08)] transition-[border-color,box-shadow,transform] duration-200 ease-out -skew-x-12 hover:-translate-y-0.5 hover:border-accent-foxo/60 hover:shadow-[0_16px_30px_-4px_rgba(247,200,11,0.45),0_4px_10px_rgba(0,0,0,0.4),inset_0_0_0_1px_rgba(247,200,11,0.42)]"
+                        className={`group/thumb relative aspect-[3/4] w-full cursor-zoom-in overflow-hidden rounded-[10px] border bg-[#141418] shadow-[0_14px_28px_-6px_rgba(0,0,0,0.55),0_4px_10px_rgba(0,0,0,0.38),inset_0_0_0_1px_rgba(255,255,255,0.08)] transition-[border-color,box-shadow,transform] duration-200 ease-out -skew-x-12 hover:-translate-y-0.5 hover:shadow-[0_16px_30px_-4px_rgba(247,200,11,0.45),0_4px_10px_rgba(0,0,0,0.4),inset_0_0_0_1px_rgba(247,200,11,0.42)] ${
+                          isMain && isMulti
+                            ? "border-accent-foxo/70 ring-1 ring-accent-foxo/50"
+                            : "border-white/[0.14] hover:border-accent-foxo/60"
+                        }`}
                       >
                         <img
                           src={item.dataURL}
@@ -1208,8 +1215,48 @@ function SimpleGenerateView({
                           <div className="absolute inset-x-1.5 top-0 h-px bg-gradient-to-r from-transparent via-white/55 to-transparent" />
                           <div className="absolute inset-y-1.5 left-0 w-px bg-gradient-to-b from-white/45 via-white/10 to-transparent" />
                         </div>
+                        {/* 主图角标（仅多图） */}
+                        {isMain && isMulti && (
+                          <span className="pointer-events-none absolute left-1 top-1 z-10 rounded-full bg-accent-foxo/85 px-1.5 py-0.5 text-[9px] font-semibold leading-none text-[#0D0D0D] skew-x-12">
+                            主图
+                          </span>
+                        )}
+                        {/* × 移除按钮 */}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRefImages((prev) => prev.filter((it) => it.id !== item.id));
+                            if (isMain) setRefMaskBlob(null); // 删主图时清旧 mask
+                          }}
+                          title="移除"
+                          aria-label="移除参考图"
+                          className="absolute right-0.5 top-0.5 z-10 grid h-4 w-4 place-items-center rounded-full bg-black/85 text-[10px] leading-none text-white ring-1 ring-white/30 skew-x-12 hover:bg-black"
+                        >
+                          ×
+                        </button>
+                        {/* 设为主图按钮（多图且非主图，hover 显示） */}
+                        {!isMain && isMulti && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRefImages((prev) => {
+                                const arr = prev.filter((it) => it.id !== item.id);
+                                return [item, ...arr];
+                              });
+                              setRefMaskBlob(null); // 切主图清旧 mask
+                            }}
+                            title="设为主图（涂抹将作用于主图）"
+                            aria-label="设为主图"
+                            className="absolute bottom-0.5 left-1/2 z-10 -translate-x-1/2 rounded-full bg-black/85 px-2 py-0.5 text-[9px] font-medium leading-none text-white opacity-0 ring-1 ring-white/20 skew-x-12 transition-opacity group-hover/thumb:opacity-100 hover:bg-black"
+                          >
+                            设为主图
+                          </button>
+                        )}
                       </div>
-                    ))}
+                      );
+                    })}
                     {refImages.length < REF_MAX && foldedRefImages.length > 0 && (
                       <button
                         title={
@@ -1218,7 +1265,7 @@ function SimpleGenerateView({
                             : "添加参考图（支持多选）"
                         }
                         onClick={() => refFileInputRef.current?.click()}
-                        className="group/add ml-1 grid h-[72px] w-[54px] shrink-0 place-items-center rounded-[10px] border border-dashed border-white/[0.18] bg-white/[0.015] text-[22px] font-light leading-none text-white/45 transition-[border-color,background-color,color,transform] duration-200 ease-out -skew-x-12 hover:-translate-y-1 hover:border-accent-foxo/60 hover:bg-accent-foxo/[0.04] hover:text-accent-foxo"
+                        className="group/add grid aspect-[3/4] w-full place-items-center rounded-[10px] border border-dashed border-white/[0.18] bg-white/[0.015] text-[22px] font-light leading-none text-white/45 transition-[border-color,background-color,color,transform] duration-200 ease-out -skew-x-12 hover:-translate-y-1 hover:border-accent-foxo/60 hover:bg-accent-foxo/[0.04] hover:text-accent-foxo"
                       >
                         +
                       </button>

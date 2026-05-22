@@ -19,7 +19,7 @@ export function RefImagesStrip({ items, onRemove, onAddFiles }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   return (
-    <div className="mb-2 flex flex-wrap items-center gap-2">
+    <div className="mb-2 grid grid-cols-5 gap-2">
       {items.map((it) => (
         <div
           key={it.id}
