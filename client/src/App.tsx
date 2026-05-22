@@ -1566,7 +1566,15 @@ function SimpleGenerateView({
               <button
                 onClick={handleGenerate}
                 disabled={!canGenerate}
-                title={canGenerate ? "出图" : isGenerating ? "生成中" : "输入提示词后回车"}
+                title={
+                  canGenerate
+                    ? "出图"
+                    : isGenerating
+                      ? "生成中"
+                      : verificationRequired
+                        ? "请先验证邮箱后再生成图片"
+                        : "输入提示词后回车"
+                }
                 className="grid h-8 w-8 place-items-center rounded-full bg-accent-foxo text-[#0D0D0D] disabled:opacity-40"
               >
                 {isGenerating ? <Spinner small /> : <SendIcon />}
