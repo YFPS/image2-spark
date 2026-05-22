@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<title>设置主图 按钮形状对比 — image2</title>
+<style>
+  /* 模拟 image2 项目风格：暗底 + accent-foxo 黄 */
+  :root {
+    --bg: #0b0b0f;
+    --card-bg: rgba(255,255,255,0.025);
+    --thumb-bg: #141418;
+    --thumb-border: rgba(255,255,255,0.14);
+    --foxo: #F2C40B;          /* accent-foxo 近似色 */
+    --foxo-dark: #0D0D0D;
+    --text: rgba(255,255,255,0.92);
+    --muted: rgba(255,255,255,0.45);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .page { max-width: 1100px; margin: 0 auto; padding: 48px 24px 96px; }
+  h1 { margin: 0 0 8px; font-size: 22px; font-weight: 600; }
+  .sub { color: var(--muted); margin-bottom: 32px; font-size: 13px; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 32px;
+  }
+
+  /* 一张参考图卡片（仿 image2 实际容器） */
+  .ref-card {
+    position: relative;
+    min-height: 200px;
+    padding: 32px 28px 24px;
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 22px;
+    background: radial-gradient(circle at 28% 8%, rgba(143,24,92,0.30), transparent 42%),
+                radial-gradient(circle at 66% 100%, rgba(210,182,27,0.16), transparent 34%),
+                rgba(11,11,15,0.3);
+    box-shadow:
+      inset 0 0 0 1px rgba(255,255,255,0.025),
+      0 0 30px rgba(158,38,116,0.14);
+  }
+  .ref-card .title {
+    color: #ffe7bd;
+    font-size: 13px;
+    font-weight: 600;
+    text-shadow: 0 0 10px rgba(247,176,91,0.30);
+    margin-bottom: 18px;
+  }
+  .ref-card .case-label {
+    display: inline-block;
+    margin-left: 10px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.06);
+    color: rgba(255,255,255,0.7);
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  /* 一张缩略图（仿实际 -skew-x-12 + aspect-[3/4]） */
+  .thumb-row {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    padding-top: 14px; /* 留按钮空间 */
+  }
+  .thumb-wrap { position: relative; }
+  .thumb {
+    position: relative;
+    aspect-ratio: 3 / 4;
+    width: 100%;
+    overflow: hidden;
+    border-radius: 10px;
+    border: 1px solid var(--thumb-border);
+    background: var(--thumb-bg);
+    transform: skewX(-12deg);
+    box-shadow:
+      0 14px 28px -6px rgba(0,0,0,0.55),
+      0 4px 10px rgba(0,0,0,0.38),
+      inset 0 0 0 1px rgba(255,255,255,0.08);
+  }
+  .thumb .gloss {
+    position: absolute; inset: 0;
+    background:
+      linear-gradient(135deg, rgba(255,255,255,0.34) 0%, rgba(255,255,255,0.10) 26%, rgba(255,255,255,0.02) 50%, transparent 62%);
+  }
+  .thumb .img {
+    position: absolute; inset: 0;
+    background: linear-gradient(160deg, #6b3aa8 0%, #2a1c4f 50%, #4d2d8a 100%);
+    transform: skewX(12deg) scale(1.25);
+  }
+  .thumb.is-main { border-color: rgba(242,196,11,0.7); box-shadow: 0 0 0 1px rgba(242,196,11,0.5), 0 14px 28px -6px rgba(0,0,0,0.55); }
+  /* hover 非主图：整张图变成"准主图"视觉（黄边 + 黄 ring + 黄光晕），与顶部按钮连成一体 */
+  .thumb-wrap:not(.is-main-wrap):hover .thumb {
+    border-color: rgba(242,196,11,0.85);
+    box-shadow:
+      0 0 0 1px rgba(242,196,11,0.6),
+      0 0 18px rgba(242,196,11,0.32),
+      0 14px 28px -6px rgba(0,0,0,0.55),
+      inset 0 0 0 1px rgba(247,200,11,0.45);
+  }
+  .main-badge {
+    position: absolute;
+    left: 4px; top: 4px;
+    z-index: 5;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: rgba(242,196,11,0.85);
+    color: var(--foxo-dark);
+    font-size: 9px;
+    font-weight: 600;
+    transform: skewX(12deg);
+    pointer-events: none;
+  }
+  .close-btn {
+    position: absolute;
+    right: 2px; top: 2px;
+    z-index: 5;
+    width: 16px; height: 16px;
+    display: grid; place-items: center;
+    border-radius: 999px;
+    background: rgba(0,0,0,0.85);
+    border: 1px solid rgba(255,255,255,0.3);
+    color: white;
+    font-size: 10px;
+    transform: skewX(12deg);
+    cursor: pointer;
+  }
+
+  /* 共通：黄按钮浮在顶部 */
+  .set-main-btn {
+    position: absolute;
+    left: 50%; top: 0;
+    transform: translate(-50%, -110%);
+    z-index: 10;
+    background: var(--foxo);
+    color: var(--foxo-dark);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    padding: 6px 14px;
+    white-space: nowrap;
+    cursor: pointer;
+    border: none;
+    box-shadow: 0 2px 10px rgba(242,196,11,0.5);
+    /* 默认隐藏，hover thumb-wrap 显示 */
+    opacity: 0;
+    transition: opacity 160ms ease, transform 160ms ease;
+  }
+  .thumb-wrap:hover .set-main-btn {
+    opacity: 1;
+    transform: translate(-50%, -110%) scale(1.04);
+  }
+
+  /* A 倒梯形（顶窄底宽） */
+  .set-main-btn.shape-A {
+    clip-path: polygon(20% 0%, 80% 0%, 100% 100%, 0% 100%);
+    padding: 6px 18px;
+  }
+  /* B 正梯形（顶宽底窄） */
+  .set-main-btn.shape-B {
+    clip-path: polygon(0% 0%, 100% 0%, 80% 100%, 20% 100%);
+    padding: 6px 18px;
+  }
+  /* C — 圆角梯形 + 顶部黄色衍生按钮区。
+     梯形整体上宽下窄，顶部 20px 为黄色按钮区（与梯形两侧同角度切边、顶部同圆角）；
+     底部为玻璃半透明体，自然延伸并叠 8px 进缩略图消除接缝。 */
+  .set-main-btn.shape-C {
+    left: 0;
+    right: 0;
+    width: 100%;
+    top: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    /* 48px 总高 − 8px 叠入 = 40px 悬在缩略图上方 */
+    transform: translateY(calc(-100% + 8px));
+    opacity: 0;
+    transition: opacity 160ms ease, transform 160ms ease;
+  }
+  .thumb-wrap:hover .set-main-btn.shape-C {
+    opacity: 1;
+    transform: translateY(calc(-100% + 8px)) scale(1.02);
+  }
+
+  /* 梯形外容器：clip-path 统一切割，drop-shadow 沿轮廓发光 */
+  .shape-C-outer {
+    position: relative;
+    width: 100%;
+    height: 48px;
+    clip-path: url(#roundedTrapezoid);
+    background: rgba(255,255,255,0.035);
+    filter: drop-shadow(0 -3px 8px rgba(242,196,11,0.40));
+  }
+
+  /* 顶部黄色按钮区：与梯形两侧同角度（clip-path 自动切）、顶部同圆角 */
+  .shape-C-tab {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 20px;
+    background: var(--foxo);
+    box-shadow: 0 0 0 1px rgba(242,196,11,0.85) inset;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--foxo-dark);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    user-select: none;
+  }
+
+  .footer-note { margin-top: 18px; font-size: 12px; color: var(--muted); }
+  .hint {
+    position: fixed; left: 24px; bottom: 16px;
+    padding: 8px 14px;
+    border-radius: 12px;
+    background: rgba(255,255,255,0.06);
+    color: rgba(255,255,255,0.72);
+    font-size: 12px;
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>「设置主图」按钮形状对比</h1>
+  <div class="sub">把鼠标移入任一张缩略图（第 2-5 张）→ 黄色按钮浮在顶部出现。3 种形状方案。</div>
+
+  <div class="grid">
+    <!-- A 倒梯形 -->
+    <div class="ref-card">
+      <div class="title">参考图（折叠状态）<span class="case-label">A · 倒梯形</span></div>
+      <div class="thumb-row">
+        <div class="thumb-wrap is-main-wrap">
+          <div class="thumb is-main">
+            <div class="img"></div>
+            <div class="gloss"></div>
+            <span class="main-badge">主图</span>
+            <button class="close-btn">×</button>
+          </div>
+        </div>
+        <div class="thumb-wrap">
+          <button class="set-main-btn shape-A">设置主图</button>
+          <div class="thumb">
+            <div class="img"></div>
+            <div class="gloss"></div>
+            <button class="close-btn">×</button>
+          </div>
+        </div>
+        <div class="thumb-wrap">
+          <button class="set-main-btn shape-A">设置主图</button>
+          <div class="thumb">
+            <div class="img"></div>
+            <div class="gloss"></div>
+            <button class="close-btn">×</button>
+          </div>
+        </div>
+        <div class="thumb-wrap">
+          <button class="set-main-btn shape-A">设置主图</button>
+          <div class="thumb">
+            <div class="img"></div>
+            <div class="gloss"></div>
+            <button class="close-btn">×</button>
+          </div>
+        </div>
+        <div class="thumb-wrap">
+          <button class="set-main-btn shape-A">设置主图</button>
+          <div class="thumb">
+            <div class="img"></div>
+            <div class="gloss"></div>
+            <button class="close-btn">×</button>
+          </div>
+        </div>
+      </div>
+      <div class="footer-note">clip-path: polygon(20% 0%, 80% 0%, 100% 100%, 0% 100%)</div>
+    </div>
+
+    <!-- B 正梯形 -->
+    <div class="ref-card">
+      <div class="title">参考图（折叠状态）<span class="case-label">B · 正梯形</span></div>
+      <div class="thumb-row">
+        <div class="thumb-wrap is-main-wrap">
+          <div class="thumb is-main">
+            <div class="img"></div>
+            <div class="gloss"></div>
+            <span class="main-badge">主图</span>
+            <button class="close-btn">×</button>
+          </div>
+        </div>
+        <div class="thumb-wrap">
+          <button class="set-main-btn shape-B">设置主图</button>
+          <div class="thumb">
+            <div class="img"></div>
+            <div class="gloss"></div>
+            <button class="close-btn">×</button>
+          </div>
+        </div>
+        <div class="thumb-wrap">
+          <button class="set-main-btn shape-B">设置主图</button>
+          <div class="thumb">
+            <div class="img"></div>
+            <div class="gloss"></div>
+            <button class="close-btn">×</button>
+          </div>
+        </div>
+        <div class="thumb-wrap">
+          <button class="set-main-btn shape-B">设置主图</button>
+          <div class="thumb">
+            <div class="img"></div>
+            <div class="gloss"></div>
+            <button class="close-btn">×</button>
+          </div>
+        </div>
+        <div class="thumb-wrap">
+          <button class="set-main-btn shape-B">设置主图</button>
+          <div class="thumb">
+            <div class="img"></div>
+            <div class="gloss"></div>
+            <button class="close-btn">×</button>
+          </div>
+        </div>
+      </div>
+      <div class="footer-note">clip-path: polygon(0% 0%, 100% 0%, 80% 100%, 20% 100%)</div>
+    </div>
+
+    <!-- C 圆角梯形 -->
+    <div class="ref-card">
+      <!-- 隐藏 SVG：定义圆角梯形 clipPath（objectBoundingBox 坐标：0~1） -->
+      <svg width="0" height="0" style="position:absolute;pointer-events:none;">
+        <defs>
+          <clipPath id="roundedTrapezoid" clipPathUnits="objectBoundingBox">
+            <path d="M 0.16,0.133
+                     Q 0.16,0   0.20,0
+                     L 0.80,0
+                     Q 0.84,0   0.84,0.133
+                     L 0.97,0.867
+                     Q 0.98,1   0.94,1
+                     L 0.06,1
+                     Q 0.02,1   0.03,0.867
+                     Z" />
+          </clipPath>
+        </defs>
+      </svg>
+
+      <div class="title">参考图（折叠状态）<span class="case-label">C · 圆角梯形</span></div>
+      <div class="thumb-row">
+        <div class="thumb-wrap is-main-wrap">
+          <div class="thumb is-main">
+            <div class="img"></div>
+            <div class="gloss"></div>
+            <span class="main-badge">主图</span>
+            <button class="close-btn">×</button>
+          </div>
+        </div>
+        <div class="thumb-wrap">
+          <button class="set-main-btn shape-C">
+            <div class="shape-C-outer">
+              <div class="shape-C-tab">设置主图</div>
+            </div>
+          </button>
+          <div class="thumb">
+            <div class="img"></div>
+            <div class="gloss"></div>
+            <button class="close-btn">×</button>
+          </div>
+        </div>
+        <div class="thumb-wrap">
+          <button class="set-main-btn shape-C">
+            <div class="shape-C-outer">
+              <div class="shape-C-tab">设置主图</div>
+            </div>
+          </button>
+          <div class="thumb">
+            <div class="img"></div>
+            <div class="gloss"></div>
+            <button class="close-btn">×</button>
+          </div>
+        </div>
+        <div class="thumb-wrap">
+          <button class="set-main-btn shape-C">
+            <div class="shape-C-outer">
+              <div class="shape-C-tab">设置主图</div>
+            </div>
+          </button>
+          <div class="thumb">
+            <div class="img"></div>
+            <div class="gloss"></div>
+            <button class="close-btn">×</button>
+          </div>
+        </div>
+        <div class="thumb-wrap">
+          <button class="set-main-btn shape-C">
+            <div class="shape-C-outer">
+              <div class="shape-C-tab">设置主图</div>
+            </div>
+          </button>
+          <div class="thumb">
+            <div class="img"></div>
+            <div class="gloss"></div>
+            <button class="close-btn">×</button>
+          </div>
+        </div>
+      </div>
+      <div class="footer-note">clip-path: url(#roundedTrapezoid) — 顶部窄 60% → 底宽 94%，四角 Q 曲线圆角</div>
+    </div>
+  </div>
+</div>
+
+<div class="hint">悬停任一张非主图缩略图：整张图变黄选中态 + 顶部按钮浮出 · 选好告诉我 A / B / C</div>
+</body>
+</html>

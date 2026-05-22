@@ -63,15 +63,15 @@ Get-NetTCPConnection -LocalPort 8000 | Select-Object -Expand OwningProcess | For
 
 `server/app/main.py` 极薄：只装 CORS + 挂 `routers/images.py`。所有业务在 `routers/images.py`，由四个职责清晰的模块支撑：
 
-- `config.py` — 从 `server/.env` 读取所有运行时配置（`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`UPSTREAM_MODEL_OVERRIDE` / `_4K`、`SEGMENT_BACKEND`、SAM/MobileSAM 权重路径等）。`get_settings()` 用 `lru_cache` 单例化。
+- `config.py` — 从 `server/.env` 读取所有运行时配置（`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`SEGMENT_BACKEND`、SAM/MobileSAM 权重路径、JWT/SMTP/限流 等）。`get_settings()` 用 `lru_cache` 单例化。
 - `openai_client.py` — 透传到上游 `/v1/images/generations` 与 `/v1/images/edits` 的 httpx 客户端，统一抛 `UpstreamError` / `UpstreamTimeout`。
 - `schemas.py` — Pydantic 请求/响应模型。`GenerateRequest.size` 的校验规则较严（16 的倍数、单边 ≤3840、总像素 655360–8294400、宽高比 ≤3:1，允许全角 `×`）；新增字段时这里是真相源。
 - `segment_service.py` — ML 抠图。后端可由 env `SEGMENT_BACKEND` 切换：`grabcut`（默认，OpenCV GrabCut + 用户矩形 prompt，复杂海报场景）/ `rembg`（v1 显著性分割）/ `sam` / `mobile_sam`。所有模型 session/predictor 都是**懒加载单例**——不要在 import 期加载，启动路径必须保持轻。CPU 密集推理在路由里用 `asyncio.to_thread` 推到线程池。
 
 ### 路由约定（`/api/images/*`）
 
-- `POST /generate` — 文生图。**模型路由策略**：若请求 size 单边 > 2048，使用 `UPSTREAM_MODEL_OVERRIDE_4K`，否则用 `UPSTREAM_MODEL_OVERRIDE`，再否则透传前端 `model`。中转商常用 `gpt-image-2-vip` / `-vip-4k` 这类变体名，所以这层 override 不要丢。
-- `POST /edit` — Inpainting（multipart：`image`、`mask`、`prompt`、`size`、…）。**复用 `/generate` 同一套 4K 模型路由策略**——改一处时两处同步改。
+- `POST /generate` — 文生图。**模型固定为 `gpt-image-2`**：路由内 `upstream_model = "gpt-image-2"` 硬编码，前端传的 `model` 字段会被忽略，上游也不做 size→model 的分流（中转商当前只提供这一个模型变体）。如果未来再出现 4K / vip 等变体，再在 `routers/images.py` 里加路由策略并同步改 `/edit`。
+- `POST /edit` — Inpainting / 多参考图编辑（multipart：`image[]`、`mask`、`prompt`、`size`、…）。同样把 model 硬编码为 `gpt-image-2`，与 `/generate` 保持一致。
 - `POST /segment` — 给定 `url + x,y,w,h + padding_factor`，返回紧凑 bbox 的透明 PNG。
 - `GET /proxy-image?url=` — 反代上游 CDN 图片，规避前端 canvas 跨域 taint。强约束：仅 https、Content-Type 必须 `image/*`、单文件 ≤ 50 MB。
 

@@ -542,24 +542,6 @@ function SimpleGenerateView({
   // 聊天输入框 ref，供后续 onPaste / handleSetAsEditTarget 等使用
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
   const [chatDragOver, setChatDragOver] = useState(false);
-  // 输入框高度（JS 自定义垂直 resize；handle 在右上角，向上拖 = 放大）
-  const [chatTextareaHeight, setChatTextareaHeight] = useState(36);
-  const startChatResize = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const startY = e.clientY;
-    const startH = chatTextareaHeight;
-    const onMove = (ev: MouseEvent) => {
-      // 向上拖（clientY 减小）→ 高度增加
-      const next = Math.max(36, Math.min(360, startH + (startY - ev.clientY)));
-      setChatTextareaHeight(next);
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  };
 
   // 把粘贴/拖拽进来的 image File 追加到 refImages（不替换；与"作为修改起点"按钮的替换语义区分）
   const appendRefImagesFromFiles = async (files: File[]) => {
@@ -598,6 +580,14 @@ function SimpleGenerateView({
   // ModelPlaza 内部自管选型；这里只读 selectedModel 用于顶部副标显示
   const [selectedModel] = useState<"gpt-image-2" | "banana-nano-pro">("gpt-image-2");
   const [chatInput, setChatInput] = useState("");
+
+  // 输入框 auto-grow：内容变化时按 scrollHeight 重置高度；max-h-[50vh] 在 className 兜底
+  useEffect(() => {
+    const el = chatInputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [chatInput]);
 
   // 出图状态
   const [loading, setLoading] = useState(false);
@@ -1746,8 +1736,8 @@ function SimpleGenerateView({
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => {
-                    // Enter 提交、Shift+Enter 换行（与 ChatGPT 一致）
-                    if (e.key === "Enter" && !e.shiftKey) {
+                    // Ctrl/Cmd+Enter 提交；普通 Enter 换行（textarea 默认行为，配合 auto-grow 实现"无限换行"）
+                    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
                       e.preventDefault();
                       handleGenerate();
                     }
@@ -1765,32 +1755,14 @@ function SimpleGenerateView({
                     isGenerating
                       ? "生成中…"
                       : mode === "edit"
-                        ? "描述你想如何修改图片，回车修改（Shift+Enter 换行）"
+                        ? "描述你想如何修改图片，Ctrl+Enter 提交（Enter 换行）"
                         : mode === "reasoning"
-                          ? "描述你想生成的画面（思考模式），回车出图"
-                          : "描述你想生成的画面，回车出图"
+                          ? "描述你想生成的画面（思考模式），Ctrl+Enter 提交（Enter 换行）"
+                          : "描述你想生成的画面，Ctrl+Enter 提交（Enter 换行）"
                   }
                   disabled={isGenerating}
-                  style={{ height: `${chatTextareaHeight}px` }}
-                  className="block w-full resize-none overflow-y-auto bg-transparent pr-7 py-1 text-[13px] leading-relaxed text-white/90 placeholder:text-white/32 focus:outline-none disabled:opacity-50"
+                  className="block w-full resize-none overflow-y-auto max-h-[50vh] bg-transparent py-1 text-[13px] leading-relaxed text-white/90 placeholder:text-white/32 focus:outline-none disabled:opacity-50 [scrollbar-color:rgba(255,255,255,0.16)_transparent] [scrollbar-width:thin]"
                 />
-                <button
-                  type="button"
-                  onMouseDown={startChatResize}
-                  title="拖动调整输入框高度"
-                  aria-label="拖动调整输入框高度"
-                  className="absolute right-0 top-0 grid h-5 w-5 cursor-ns-resize place-items-center rounded-md text-white/40 hover:bg-white/[0.06] hover:text-white/72"
-                >
-                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-                    <path
-                      d="M8 2 L8 14 M5 5 L8 2 L11 5 M5 11 L8 14 L11 11"
-                      stroke="currentColor"
-                      strokeWidth="1.4"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </button>
               </div>
               <button
                 onClick={handleGenerate}
@@ -2289,32 +2261,99 @@ function BrainIcon() {
   );
 }
 
-/** 全屏图片预览遮罩：点背景或 ESC 关闭 */
+/** 全屏图片预览遮罩 + 放大镜工具
+ *
+ * 交互：
+ * - 点击图片：以点击点为中心放大 1.5 倍（最高 8 倍）
+ * - 按住 Alt 点击：以点击点为中心缩小 1.5 倍（最低 1 倍）
+ * - 双击图片：复位到 1 倍
+ * - 点击背景 / 关闭按钮 / ESC：关闭
+ *
+ * 性能：去掉 backdrop-blur（避免全屏模糊后面的 WebGL 画布造成卡顿），改用纯黑遮罩
+ */
 function ImagePreviewModal({ src, onClose }: { src: string; onClose: () => void }) {
+  const [scale, setScale] = useState(1);
+  const [origin, setOrigin] = useState({ x: 50, y: 50 });
+  const [altPressed, setAltPressed] = useState(false);
+
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
+    const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
+      if (e.key === "Alt") setAltPressed(true);
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Alt") setAltPressed(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
   }, [onClose]);
+
+  const handleImgClick = (e: React.MouseEvent<HTMLImageElement>) => {
+    e.stopPropagation();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const ox = ((e.clientX - rect.left) / rect.width) * 100;
+    const oy = ((e.clientY - rect.top) / rect.height) * 100;
+    setOrigin({ x: ox, y: oy });
+    if (e.altKey) {
+      setScale((s) => Math.max(1, +(s / 1.5).toFixed(3)));
+    } else {
+      setScale((s) => Math.min(8, +(s * 1.5).toFixed(3)));
+    }
+  };
+
+  const handleDoubleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setScale(1);
+    setOrigin({ x: 50, y: 50 });
+  };
+
+  // 按住 Alt 显示 zoom-out 光标提示「下次点击会缩小」
+  const cursorClass = altPressed
+    ? "cursor-zoom-out"
+    : scale >= 8
+      ? "cursor-not-allowed"
+      : "cursor-zoom-in";
 
   return (
     <div
       onClick={onClose}
-      className="fixed inset-0 z-[100] grid place-items-center bg-black/82 backdrop-blur-md"
+      className="fixed inset-0 z-[100] grid place-items-center bg-black/95"
     >
-      <img
-        src={src}
-        alt=""
+      {/* overflow-hidden 容器：图被 transform 放大后超出部分由容器裁掉，实现"局部放大窥视" */}
+      <div
+        className="relative max-h-[92vh] max-w-[92vw] overflow-hidden rounded-[12px] border border-white/[0.08] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
-        className="max-h-[92vh] max-w-[92vw] rounded-[12px] border border-white/[0.08] shadow-2xl"
-        draggable={false}
-      />
+      >
+        <img
+          src={src}
+          alt=""
+          onClick={handleImgClick}
+          onDoubleClick={handleDoubleClick}
+          style={{
+            transform: `scale(${scale})`,
+            transformOrigin: `${origin.x}% ${origin.y}%`,
+            transition: "transform 220ms cubic-bezier(0.22, 1, 0.36, 1)",
+          }}
+          className={`block max-h-[92vh] max-w-[92vw] select-none ${cursorClass}`}
+          draggable={false}
+        />
+      </div>
+
+      {/* 缩放级别 + 操作提示（仅放大时显示） */}
+      {scale > 1 && (
+        <div className="pointer-events-none absolute bottom-6 left-1/2 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1.5 text-[11px] text-white/85 ring-1 ring-white/10">
+          {Math.round(scale * 100)}% · 点击继续放大 · 按住 Alt 点击缩小 · 双击复位
+        </div>
+      )}
+
       <button
         onClick={onClose}
         title="关闭"
-        className="absolute right-6 top-6 grid h-10 w-10 place-items-center rounded-full border border-white/[0.08] bg-[#17171b]/82 text-white/80 backdrop-blur-md hover:bg-[#1e1e22]"
+        className="absolute right-6 top-6 grid h-10 w-10 place-items-center rounded-full border border-white/[0.08] bg-[#17171b]/82 text-white/80 hover:bg-[#1e1e22]"
       >
         ✕
       </button>

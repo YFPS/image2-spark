@@ -17,6 +17,9 @@ server/models/
 # 本地构建/生成产物（PSD、切层图等）
 outputs/
 
+# Claude/调试期产物（截图、烟测脚本）
+.verify/
+
 .DS_Store
 .idea/
 .vscode/
