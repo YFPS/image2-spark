@@ -15,7 +15,10 @@ import cv2
 import httpx
 import numpy as np
 from PIL import Image
-from rembg import new_session, remove
+
+# 不要在模块顶层 import rembg —— rembg 顶层会做 backend 探测（在无 GPU 的某些云
+# 服务器上会阻塞超过 30s 让进程启动卡死）。改为在 get_rembg_session() 内 lazy import，
+# 与 SEGMENT_BACKEND=grabcut（默认）路径完全不触发 rembg。
 
 from .config import get_settings
 
@@ -30,6 +33,8 @@ _mobile_sam_predictor = None
 def get_rembg_session():
     global _session
     if _session is None:
+        from rembg import new_session  # lazy: 顶层 import 在某些环境会卡 import
+
         model = get_settings().rembg_model
         logger.info("初始化 rembg session model=%s（首次会下载模型）", model)
         _session = new_session(model)
@@ -551,6 +556,8 @@ def segment_rembg(
     cropped = img.crop((int(round(sx)), int(round(sy)), int(round(sx2)), int(round(sy2))))
 
     # 2) rembg 抠图（输入 RGB / 输出 RGBA）
+    from rembg import remove  # lazy import；见 get_rembg_session 注释
+
     session = get_rembg_session()
     rgba = remove(cropped, session=session)
     if rgba.mode != "RGBA":
