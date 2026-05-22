@@ -1409,9 +1409,11 @@ function SimpleGenerateView({
           </div>
         </div>
 
-        {/* 最近作品横滑 */}
+        {/* 最近作品横滑 —— 受控组件，items/loading 由 App 层的 useRecentWorks 单例提供 */}
         <RecentWorksCard
           ref={recentCardRef}
+          items={recentWorks.items}
+          loading={recentWorks.loading}
           onPreview={(src) => setPreviewSrc(src)}
         />
 

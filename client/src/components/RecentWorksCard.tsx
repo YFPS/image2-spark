@@ -1,18 +1,19 @@
 import { forwardRef } from "react";
 
 import { useAuth } from "../auth/AuthContext";
-import { useRecentWorks } from "../hooks/useRecentWorks";
+import type { RecentWorkItem } from "../api/gptImage";
 import { formatRelativeTime } from "../utils/relativeTime";
 
 type Props = {
+  items: RecentWorkItem[];
+  loading: boolean;
   /** 点击缩略图时把图 URL 抛给上层（复用现有 lightbox setPreviewSrc）*/
   onPreview: (src: string) => void;
 };
 
 export const RecentWorksCard = forwardRef<HTMLDivElement, Props>(
-  function RecentWorksCard({ onPreview }, ref) {
+  function RecentWorksCard({ items, loading, onPreview }, ref) {
     const { user } = useAuth();
-    const { items, loading } = useRecentWorks();
 
     // 未登录：整卡不渲染（连占位都不画）
     if (!user) return null;
@@ -50,7 +51,6 @@ export const RecentWorksCard = forwardRef<HTMLDivElement, Props>(
                   loading="lazy"
                   className="h-full w-full object-cover"
                   onError={(e) => {
-                    // 加载失败：藏掉 img，让深底色 + 时间标签露出
                     (e.currentTarget as HTMLImageElement).style.visibility = "hidden";
                   }}
                 />
