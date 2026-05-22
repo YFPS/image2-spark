@@ -262,3 +262,25 @@ export async function fetchRecentWorks(): Promise<RecentWorkItem[]> {
   const data = (await res.json()) as RecentWorksOut;
   return data.items;
 }
+
+// ===== 画廊（GET /api/me/works）=====
+
+export type WorksPage = {
+  items: RecentWorkItem[];
+  next_cursor: number | null;
+};
+
+export async function fetchWorks(opts?: {
+  cursor?: number | null;
+  limit?: number;
+}): Promise<WorksPage> {
+  const params = new URLSearchParams();
+  if (opts?.cursor != null) params.set("cursor", String(opts.cursor));
+  if (opts?.limit != null) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  const res = await authFetch(`/api/me/works${qs ? `?${qs}` : ""}`);
+  if (!res.ok) {
+    throw new Error(`fetchWorks failed: ${res.status}`);
+  }
+  return (await res.json()) as WorksPage;
+}
