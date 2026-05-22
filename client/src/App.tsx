@@ -545,18 +545,29 @@ function SimpleGenerateView({
 
   // 把粘贴/拖拽进来的 image File 追加到 refImages（不替换；与"作为修改起点"按钮的替换语义区分）
   const appendRefImagesFromFiles = async (files: File[]) => {
-    const remaining = REF_MAX - refImages.length;
-    if (remaining <= 0) {
-      setErrorMsg(`参考图最多 ${REF_MAX} 张`);
-      return;
-    }
-    const accepted = files.slice(0, remaining);
     try {
-      const dataURLs = await Promise.all(accepted.map(fileToDataURL));
-      setRefImages((prev) => [
-        ...prev,
-        ...dataURLs.map((d) => ({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`, dataURL: d })),
-      ]);
+      // 把全部文件都转 dataURL；超额由 setRefImages 内的函数式更新截断（避免并发拖拽超 REF_MAX）
+      const dataURLs = await Promise.all(files.map(fileToDataURL));
+      let truncated = false;
+      setRefImages((prev) => {
+        const remaining = REF_MAX - prev.length;
+        if (remaining <= 0) {
+          truncated = true;
+          return prev;
+        }
+        const accepted = dataURLs.slice(0, remaining);
+        if (accepted.length < dataURLs.length) truncated = true;
+        return [
+          ...prev,
+          ...accepted.map((d) => ({
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+            dataURL: d,
+          })),
+        ];
+      });
+      if (truncated) {
+        setErrorMsg(`参考图最多 ${REF_MAX} 张，已截断超出部分`);
+      }
     } catch (e) {
       setErrorMsg(e instanceof Error ? e.message : "读取图片失败");
     }
@@ -750,7 +761,7 @@ function SimpleGenerateView({
   const verificationRequired = user?.verification_required ?? false;
   const canGenerate =
     !isGenerating && (ratio !== "custom" || customSizeError == null) && chatInput.trim().length > 0
-    && (mode !== "edit" || lastResultSrc != null)
+    && (mode !== "edit" || lastResultSrc != null || refImages.length > 0)
     && !verificationRequired;
 
   const handleGenerate = async () => {
@@ -961,13 +972,21 @@ function SimpleGenerateView({
             }`}
           >
             <div className="flex min-w-0 items-center gap-2">
-              <div className="grid h-10 w-10 shrink-0 place-items-center rounded-[14px] bg-accent-foxo text-[14px] font-semibold text-[#0D0D0D]">
-                ✦
-              </div>
-              {sidebarExpanded && (
-                <span className="truncate text-[14px] font-semibold tracking-tight text-white/92">
-                  Mona
-                </span>
+              {/* 展开态：完整横向 logo（含 Mona 字样）；收起态：纯图标 */}
+              {sidebarExpanded ? (
+                <img
+                  src="/logo2.png"
+                  alt="Mona"
+                  className="h-10 w-auto shrink-0 select-none"
+                  draggable={false}
+                />
+              ) : (
+                <img
+                  src="/logo.png"
+                  alt="Mona"
+                  className="h-10 w-10 shrink-0 select-none"
+                  draggable={false}
+                />
               )}
             </div>
             {sidebarExpanded && (
