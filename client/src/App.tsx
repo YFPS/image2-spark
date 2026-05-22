@@ -537,6 +537,8 @@ function SimpleGenerateView({
   const chatPanelRef = useRef<HTMLDivElement | null>(null);
   // 聊天消息滚动容器 —— TimelineQuickJump 用它读 scrollTop 算"当前消息"并 scrollTo 跳转
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  // 聊天输入框 ref，供后续 onPaste / handleSetAsEditTarget 等使用
+  const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
 
   const [activeNav, setActiveNav] = useState("studio");
@@ -1561,27 +1563,30 @@ function SimpleGenerateView({
             )}
 
             {/* 输入条 */}
-            <div className="flex shrink-0 items-center gap-2 rounded-[18px] border border-white/[0.04] bg-[#141418] px-3 py-2">
-              <input
+            <div className="flex shrink-0 items-start gap-2 rounded-[18px] border border-white/[0.04] bg-[#141418] px-3 py-2">
+              <textarea
+                ref={chatInputRef}
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 onKeyDown={(e) => {
+                  // Enter 提交、Shift+Enter 换行（与 ChatGPT 一致）
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
                     handleGenerate();
                   }
                 }}
+                rows={1}
                 placeholder={
                   isGenerating
                     ? "生成中…"
                     : mode === "edit"
-                      ? "描述你想如何修改图片，回车修改"
+                      ? "描述你想如何修改图片，回车修改（Shift+Enter 换行）"
                       : mode === "reasoning"
                         ? "描述你想生成的画面（思考模式），回车出图"
                         : "描述你想生成的画面，回车出图"
                 }
                 disabled={isGenerating}
-                className="min-w-0 flex-1 bg-transparent text-[13px] text-white/90 placeholder:text-white/32 focus:outline-none disabled:opacity-50"
+                className="min-h-[36px] max-h-[240px] min-w-0 flex-1 resize-y overflow-y-auto bg-transparent py-1 text-[13px] leading-relaxed text-white/90 placeholder:text-white/32 focus:outline-none disabled:opacity-50"
               />
               <button
                 onClick={handleGenerate}
