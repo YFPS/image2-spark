@@ -64,12 +64,10 @@ def _rand_email() -> str:
 )
 class RecentWorksTests(unittest.IsolatedAsyncioTestCase):
     created_emails: list[str]
-    created_user_ids: list[int]
     created_conv_ids: list[int]
 
     async def asyncSetUp(self) -> None:
         self.created_emails = []
-        self.created_user_ids = []
         self.created_conv_ids = []
 
         # 每个用例新事件循环，得清掉 lru_cache 的旧连接
@@ -97,8 +95,6 @@ class RecentWorksTests(unittest.IsolatedAsyncioTestCase):
                     User.__table__.select().where(User.email.in_(self.created_emails))
                 )
                 ids = [r.id for r in rows.fetchall()]
-                ids.extend(self.created_user_ids)
-                ids = list(set(ids))
                 if ids:
                     await s.execute(
                         delete(EmailVerificationToken).where(EmailVerificationToken.user_id.in_(ids))
