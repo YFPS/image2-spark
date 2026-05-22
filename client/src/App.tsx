@@ -1204,50 +1204,8 @@ function SimpleGenerateView({
                       const isMain = idx === 0;
                       const isMulti = refImages.length > 1;
                       return (
-                      <div
-                        key={item.id}
-                        title="点击放大预览"
-                        onClick={() => setPreviewSrc(item.dataURL)}
-                        className={`group/thumb relative aspect-[3/4] w-full cursor-zoom-in overflow-hidden rounded-[10px] border bg-[#141418] shadow-[0_14px_28px_-6px_rgba(0,0,0,0.55),0_4px_10px_rgba(0,0,0,0.38),inset_0_0_0_1px_rgba(255,255,255,0.08)] transition-[border-color,box-shadow,transform] duration-200 ease-out -skew-x-12 hover:-translate-y-0.5 hover:shadow-[0_16px_30px_-4px_rgba(247,200,11,0.45),0_4px_10px_rgba(0,0,0,0.4),inset_0_0_0_1px_rgba(247,200,11,0.42)] ${
-                          isMain && isMulti
-                            ? "border-accent-foxo/70 ring-1 ring-accent-foxo/50"
-                            : "border-white/[0.14] hover:border-accent-foxo/60"
-                        }`}
-                      >
-                        <img
-                          src={item.dataURL}
-                          alt={`参考图 ${idx + 1}`}
-                          className="h-full w-full object-cover skew-x-12 scale-125"
-                          draggable={false}
-                        />
-                        {/* 玻璃膜：斜向高光 + 顶部亮边 + 左侧亮边 + 底部暗化 */}
-                        <div className="pointer-events-none absolute inset-0 rounded-[10px]">
-                          <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.34)_0%,rgba(255,255,255,0.10)_26%,rgba(255,255,255,0.02)_50%,transparent_62%)]" />
-                          <div className="absolute inset-x-0 bottom-0 h-1/3 bg-gradient-to-t from-black/35 to-transparent" />
-                          <div className="absolute inset-x-1.5 top-0 h-px bg-gradient-to-r from-transparent via-white/55 to-transparent" />
-                          <div className="absolute inset-y-1.5 left-0 w-px bg-gradient-to-b from-white/45 via-white/10 to-transparent" />
-                        </div>
-                        {/* 主图角标（仅多图） */}
-                        {isMain && isMulti && (
-                          <span className="pointer-events-none absolute left-1 top-1 z-10 rounded-full bg-accent-foxo/85 px-1.5 py-0.5 text-[9px] font-semibold leading-none text-[#0D0D0D] skew-x-12">
-                            主图
-                          </span>
-                        )}
-                        {/* × 移除按钮 */}
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setRefImages((prev) => prev.filter((it) => it.id !== item.id));
-                            if (isMain) setRefMaskBlob(null); // 删主图时清旧 mask
-                          }}
-                          title="移除"
-                          aria-label="移除参考图"
-                          className="absolute right-0.5 top-0.5 z-10 grid h-4 w-4 place-items-center rounded-full bg-black/85 text-[10px] leading-none text-white ring-1 ring-white/30 skew-x-12 hover:bg-black"
-                        >
-                          ×
-                        </button>
-                        {/* 设为主图按钮（多图且非主图）：顶部上方黄色胶囊，默认可见，仿主图角标风格 */}
+                      <div key={item.id} className="group/thumb relative">
+                        {/* 设为主图按钮：放在外层（无 overflow-hidden）才能溢出到缩略图顶部之上 */}
                         {!isMain && isMulti && (
                           <button
                             type="button"
@@ -1261,11 +1219,54 @@ function SimpleGenerateView({
                             }}
                             title="设为主图（涂抹将作用于主图）"
                             aria-label="设为主图"
-                            className="absolute -top-2 left-1/2 z-20 -translate-x-1/2 skew-x-12 rounded-full bg-accent-foxo px-2 py-0.5 text-[9px] font-semibold leading-none text-[#0D0D0D] shadow-[0_2px_8px_rgba(247,200,11,0.4)] ring-1 ring-accent-foxo/40 transition-transform hover:scale-105 hover:bg-accent-foxo/90"
+                            className="absolute -top-2.5 left-1/2 z-20 -translate-x-1/2 rounded-full bg-accent-foxo px-2 py-0.5 text-[9px] font-semibold leading-none text-[#0D0D0D] shadow-[0_2px_8px_rgba(247,200,11,0.4)] ring-1 ring-accent-foxo/40 transition-transform hover:scale-105 hover:bg-accent-foxo/90"
                           >
                             设为主图
                           </button>
                         )}
+                        <div
+                          title="点击放大预览"
+                          onClick={() => setPreviewSrc(item.dataURL)}
+                          className={`relative aspect-[3/4] w-full cursor-zoom-in overflow-hidden rounded-[10px] border bg-[#141418] shadow-[0_14px_28px_-6px_rgba(0,0,0,0.55),0_4px_10px_rgba(0,0,0,0.38),inset_0_0_0_1px_rgba(255,255,255,0.08)] transition-[border-color,box-shadow,transform] duration-200 ease-out -skew-x-12 hover:-translate-y-0.5 hover:shadow-[0_16px_30px_-4px_rgba(247,200,11,0.45),0_4px_10px_rgba(0,0,0,0.4),inset_0_0_0_1px_rgba(247,200,11,0.42)] ${
+                            isMain && isMulti
+                              ? "border-accent-foxo/70 ring-1 ring-accent-foxo/50"
+                              : "border-white/[0.14] hover:border-accent-foxo/60"
+                          }`}
+                        >
+                          <img
+                            src={item.dataURL}
+                            alt={`参考图 ${idx + 1}`}
+                            className="h-full w-full object-cover skew-x-12 scale-125"
+                            draggable={false}
+                          />
+                          {/* 玻璃膜：斜向高光 + 顶部亮边 + 左侧亮边 + 底部暗化 */}
+                          <div className="pointer-events-none absolute inset-0 rounded-[10px]">
+                            <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.34)_0%,rgba(255,255,255,0.10)_26%,rgba(255,255,255,0.02)_50%,transparent_62%)]" />
+                            <div className="absolute inset-x-0 bottom-0 h-1/3 bg-gradient-to-t from-black/35 to-transparent" />
+                            <div className="absolute inset-x-1.5 top-0 h-px bg-gradient-to-r from-transparent via-white/55 to-transparent" />
+                            <div className="absolute inset-y-1.5 left-0 w-px bg-gradient-to-b from-white/45 via-white/10 to-transparent" />
+                          </div>
+                          {/* 主图角标（仅多图） */}
+                          {isMain && isMulti && (
+                            <span className="pointer-events-none absolute left-1 top-1 z-10 rounded-full bg-accent-foxo/85 px-1.5 py-0.5 text-[9px] font-semibold leading-none text-[#0D0D0D] skew-x-12">
+                              主图
+                            </span>
+                          )}
+                          {/* × 移除按钮 */}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRefImages((prev) => prev.filter((it) => it.id !== item.id));
+                              if (isMain) setRefMaskBlob(null); // 删主图时清旧 mask
+                            }}
+                            title="移除"
+                            aria-label="移除参考图"
+                            className="absolute right-0.5 top-0.5 z-10 grid h-4 w-4 place-items-center rounded-full bg-black/85 text-[10px] leading-none text-white ring-1 ring-white/30 skew-x-12 hover:bg-black"
+                          >
+                            ×
+                          </button>
+                        </div>
                       </div>
                       );
                     })}
