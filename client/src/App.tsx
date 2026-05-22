@@ -16,7 +16,7 @@ import type {
   ReactNode,
   RefObject,
 } from "react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { LiquidGlass, type GlassShape } from "./LiquidGlass";
 import { RecentWorksCard } from "./components/RecentWorksCard";
 import { GalleryPage } from "./pages/GalleryPage";
@@ -637,8 +637,12 @@ function SimpleGenerateView({
 
   // 模式：generate / edit / reasoning
   const [mode, setMode] = useState<"generate" | "edit" | "reasoning">("generate");
-  // Edit 模式下需要记住最后一张生成的图片 src
-  const [lastResultSrc, setLastResultSrc] = useState<string | null>(null);
+  // Edit 模式的"目标图片"：从当前对话最后一张 done AI 消息派生（刷新后自动认出）
+  // 注意：与 setResults/setUsage 那组 in-memory 预览状态分开，因为预览受 format 影响
+  const lastResultSrc = useMemo<string | null>(() => {
+    const { images } = extractConversationResults(conversations.current);
+    return images[0] ? imageToSrc(images[0], format) : null;
+  }, [conversations.current, format]);
   // 参考图：支持多张；refImages[0] 与 refMaskBlob 对齐（mask 仅作用于第 1 张）
   type RefItem = { id: string; dataURL: string };
   const [refImages, setRefImages] = useState<RefItem[]>([]);
@@ -858,8 +862,6 @@ function SimpleGenerateView({
     const { images, usage } = extractConversationResults(conversations.current);
     setResults(images);
     setUsage(usage);
-    const firstSrc = images[0] ? imageToSrc(images[0], format) : null;
-    if (firstSrc) setLastResultSrc(firstSrc);
   }, [conversations.current, format]);
 
   // 模式切换时清理
