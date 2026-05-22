@@ -221,3 +221,22 @@ class MessageCreateIn(BaseModel):
             if not isinstance(url, str) or not url.startswith(("http://", "https://")):
                 raise ValueError("image_urls 必须是 http/https URL")
         return v
+
+
+# ===== 最近作品（GET /api/me/recent-works）=====
+
+
+class RecentWorkItem(BaseModel):
+    """一条「最近作品」记录，对应一条已完成的 AI 消息（可能多图，取首张作主图）"""
+
+    message_id: int
+    conversation_id: int
+    image_url: str
+    image_count: int
+    all_image_urls: list[str]
+    size: str | None = None
+    created_at: datetime
+
+
+class RecentWorksOut(BaseModel):
+    items: list[RecentWorkItem]
