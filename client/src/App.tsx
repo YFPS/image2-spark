@@ -893,6 +893,20 @@ function SimpleGenerateView({
     setMode(newMode);
   };
 
+  // 从聊天里的 AI 图一键切到修改模式：替换 refImages 为单张、清旧 mask、聚焦输入框
+  const handleSetAsEditTarget = (src: string) => {
+    setRefImages([
+      {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+        dataURL: src,
+      },
+    ]);
+    setRefMaskBlob(null);
+    handleModeChange("edit");
+    // 微延迟让 mode 切换的重渲染完成再 focus
+    setTimeout(() => chatInputRef.current?.focus(), 0);
+  };
+
   useLayoutEffect(() => {
     // 当 activeNav 不是 "studio" 时（models/gallery/logs），由对应页面主导玻璃 shape，
     // MainCanvas 的 7 张玻璃壳测量跳过；同时清空 shapes，避免上次工作室的影子残留。
@@ -1527,6 +1541,7 @@ function SimpleGenerateView({
                     imageUrls={m.image_urls}
                     size={m.size}
                     onImageClick={(src) => setPreviewSrc(src)}
+                    onEditFromImage={(src) => handleSetAsEditTarget(src)}
                   >
                     {m.text}
                   </ChatBubble>
@@ -1855,6 +1870,7 @@ function ChatBubble({
   imageUrls,
   size,
   onImageClick,
+  onEditFromImage,
   children,
 }: {
   role: "ai" | "user";
@@ -1865,6 +1881,8 @@ function ChatBubble({
   /** 生图任务的请求 size，如 "1024x1024"；用于 done 时缩略图比例 */
   size?: string;
   onImageClick?: (src: string) => void;
+  /** AI 图右上角"作为修改起点"按钮回调；提供时才渲染按钮 */
+  onEditFromImage?: (src: string) => void;
   children: ReactNode;
 }) {
   const isUser = role === "user";
@@ -1898,21 +1916,45 @@ function ChatBubble({
           <div className="flex flex-col gap-1.5">
             <div className={imageUrls!.length === 1 ? "" : "grid grid-cols-2 gap-1.5"}>
               {imageUrls!.map((u) => (
-                <button
-                  key={u}
-                  type="button"
-                  onClick={() => onImageClick?.(safeImageSrc(u))}
-                  className="block overflow-hidden rounded-[10px] ring-1 ring-inset ring-white/[0.06] transition-transform hover:scale-[1.02]"
-                  style={{ aspectRatio: aspect }}
-                >
-                  <img
-                    src={safeImageSrc(u)}
-                    alt=""
-                    className="h-full w-full object-cover"
-                    loading="lazy"
-                    decoding="async"
-                  />
-                </button>
+                <div key={u} className="group relative">
+                  <button
+                    type="button"
+                    onClick={() => onImageClick?.(safeImageSrc(u))}
+                    className="block overflow-hidden rounded-[10px] ring-1 ring-inset ring-white/[0.06] transition-transform hover:scale-[1.02]"
+                    style={{ aspectRatio: aspect }}
+                  >
+                    <img
+                      src={safeImageSrc(u)}
+                      alt=""
+                      className="h-full w-full object-cover"
+                      loading="lazy"
+                      decoding="async"
+                    />
+                  </button>
+                  {onEditFromImage && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onEditFromImage(safeImageSrc(u));
+                      }}
+                      title="作为修改起点"
+                      aria-label="作为修改起点"
+                      className="absolute right-1.5 top-1.5 grid h-7 w-7 place-items-center rounded-full bg-black/55 text-white/82 opacity-0 backdrop-blur-sm transition-opacity hover:bg-black/72 hover:text-white group-hover:opacity-100"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                        <path
+                          d="M11.5 2.5 13.5 4.5 4.5 13.5 2 14 2.5 11.5z"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.4"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
             {children && <div className="px-1 text-[11px] text-white/55">{children}</div>}
