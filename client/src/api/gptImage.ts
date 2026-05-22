@@ -236,3 +236,29 @@ export async function segmentImage(req: SegmentRequest): Promise<Blob> {
   }
   return await res.blob();
 }
+
+// ===== 最近作品（GET /api/me/recent-works）=====
+
+export type RecentWorkItem = {
+  message_id: number;
+  conversation_id: number;
+  image_url: string;
+  image_count: number;
+  all_image_urls: string[];
+  size: string | null;
+  created_at: string; // ISO
+};
+
+export type RecentWorksOut = {
+  items: RecentWorkItem[];
+};
+
+/** 拉用户最近完成的 AI 出图（最多 12 条，按 created_at 倒序）*/
+export async function fetchRecentWorks(): Promise<RecentWorkItem[]> {
+  const res = await authFetch("/api/me/recent-works");
+  if (!res.ok) {
+    throw new Error(`fetchRecentWorks failed: ${res.status}`);
+  }
+  const data = (await res.json()) as RecentWorksOut;
+  return data.items;
+}
