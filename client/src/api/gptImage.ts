@@ -89,6 +89,9 @@ export async function generateImages(
     } catch {
       /* 忽略解析错误 */
     }
+    if (apiError.code === "email_not_verified") {
+      apiError.message = "请先验证邮箱后再生成图片";
+    }
     throw new GenerateError(apiError);
   }
 
@@ -167,6 +170,9 @@ export async function editImage(
       else if (j.detail?.error) apiError = j.detail.error;
     } catch {
       /* 忽略 */
+    }
+    if (apiError.code === "email_not_verified") {
+      apiError.message = "请先验证邮箱后再修改图片";
     }
     throw new GenerateError(apiError);
   }

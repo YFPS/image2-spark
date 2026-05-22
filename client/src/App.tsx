@@ -691,13 +691,21 @@ function SimpleGenerateView({
 
   const hasServerPending = conversationHasPendingGeneration(conversations.current);
   const isGenerating = loading || hasServerPending;
+  // 未验证邮箱用户禁止生成（后端有 403 兜底，这里提前 disable 避免无效请求）
+  const verificationRequired = user?.verification_required ?? false;
   const canGenerate =
     !isGenerating && (ratio !== "custom" || customSizeError == null) && chatInput.trim().length > 0
-    && (mode !== "edit" || lastResultSrc != null);
+    && (mode !== "edit" || lastResultSrc != null)
+    && !verificationRequired;
 
   const handleGenerate = async () => {
     const prompt = chatInput.trim();
     if (!prompt || isGenerating) return;
+
+    if (verificationRequired) {
+      setErrorMsg("请先验证邮箱后再生成图片");
+      return;
+    }
 
     // 确保有一个 conversation：没有就立刻在服务端创建一个空 session
     let convId = conversations.currentId;
