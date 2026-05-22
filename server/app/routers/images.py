@@ -33,7 +33,7 @@ from ..config import get_settings
 from ..db import get_db, get_session_factory
 from ..deps import get_current_user
 from ..email_verification_service import require_verified_user
-from ..models import Conversation, Message, User
+from ..models import Conversation, CreditTransaction, Message, User
 from ..openai_client import (
     UpstreamError,
     UpstreamTimeout,
@@ -71,6 +71,91 @@ def _spawn_background_task(coro) -> asyncio.Task:
 
 
 # ===== helpers =====
+
+
+# ===== 积分计费 =====
+# 生图成本：1 分/张（与 SIGNUP_BONUS_CREDITS=5 对齐：新用户能生 5 张）
+# 预扣 + 失败退款模型：
+#   1. 请求层 check 余额、扣分、写 reason='generate'/'edit' 流水（与 ai_pending_msg 同事务）
+#   2. 后台任务失败时 _refund_credits 加回 + 写 reason='refund' 流水
+#   3. 成功路径不需要再扣，预扣已经搞定
+
+
+def _calculate_cost(n: int) -> int:
+    """每张图 1 分，最少 1"""
+    return max(1, n)
+
+
+async def _charge_credits(
+    db: AsyncSession,
+    user: User,
+    cost: int,
+    ai_msg_id: int,
+    reason: str,
+) -> None:
+    """请求层预扣：从 user.credits 减 cost、写 CreditTransaction 流水。
+    调用前必须已 check user.credits >= cost；db.commit 由调用方负责。
+    """
+    user.credits = (user.credits or 0) - cost
+    db.add(
+        CreditTransaction(
+            user_id=user.id,
+            delta=-cost,
+            balance_after=user.credits,
+            reason=reason,
+            ref_type="message",
+            ref_id=str(ai_msg_id),
+            note=f"{reason} {cost} 张",
+        )
+    )
+
+
+async def _refund_credits(
+    factory,
+    user_id: int,
+    ai_msg_id: int,
+    cost: int,
+    fail_reason: str,
+) -> None:
+    """后台任务失败时退款：加回 user.credits + 写 reason='refund' 流水。独立 session。"""
+    async with factory() as db:
+        try:
+            row = (
+                await db.execute(select(User).where(User.id == user_id))
+            ).scalar_one_or_none()
+            if row is None:
+                logger.error("refund 找不到 user_id=%s ai_msg_id=%s", user_id, ai_msg_id)
+                return
+            row.credits = (row.credits or 0) + cost
+            db.add(
+                CreditTransaction(
+                    user_id=user_id,
+                    delta=cost,
+                    balance_after=row.credits,
+                    reason="refund",
+                    ref_type="message",
+                    ref_id=str(ai_msg_id),
+                    note=f"生图失败退款：{fail_reason}",
+                )
+            )
+            await db.commit()
+        except Exception:  # noqa: BLE001
+            await db.rollback()
+            logger.exception("refund 写库失败 user_id=%s ai_msg_id=%s", user_id, ai_msg_id)
+
+
+def _insufficient_credits(current: int, need: int) -> HTTPException:
+    return HTTPException(
+        status_code=402,
+        detail={
+            "error": {
+                "code": "insufficient_credits",
+                "message": f"积分不足：需要 {need}，当前 {current}",
+                "current": current,
+                "need": need,
+            }
+        },
+    )
 
 
 def _to_msg_out(m: Message) -> MessageOut:
@@ -178,9 +263,14 @@ def _parse_upstream_images(
 
 
 async def _run_generate_task(
-    ai_msg_id: int, conv_id: int, payload: dict[str, Any], action_label: str
+    ai_msg_id: int,
+    conv_id: int,
+    payload: dict[str, Any],
+    action_label: str,
+    user_id: int,
+    cost: int,
 ) -> None:
-    """后台任务：调上游 generate，回写 message"""
+    """后台任务：调上游 generate，回写 message。失败时退款。"""
     factory = get_session_factory()
     try:
         upstream_json = await call_images_generate(payload)
@@ -188,18 +278,21 @@ async def _run_generate_task(
         await _finalize_message(
             factory, ai_msg_id, conv_id, ok=False, text=f"失败：上游超时 ({e})"
         )
+        await _refund_credits(factory, user_id, ai_msg_id, cost, f"上游超时 ({e})")
         return
     except UpstreamError as e:
         await _finalize_message(
             factory, ai_msg_id, conv_id, ok=False,
             text=f"失败：upstream_error：{e}",
         )
+        await _refund_credits(factory, user_id, ai_msg_id, cost, f"upstream_error: {e}")
         return
     except Exception as e:  # noqa: BLE001
         logger.exception("generate task 异常 ai_msg_id=%s", ai_msg_id)
         await _finalize_message(
             factory, ai_msg_id, conv_id, ok=False, text=f"失败：{e}"
         )
+        await _refund_credits(factory, user_id, ai_msg_id, cost, f"task 异常: {e}")
         return
 
     urls, usage, n_imgs = _parse_upstream_images(
@@ -251,16 +344,29 @@ async def generate(
     # 鉴权 + 会话归属校验
     conv = await _load_owned_conv(db, user.id, conversation_id)
 
+    # 预扣积分（与 pending msg 同事务）
+    cost = _calculate_cost(req.n)
+    current_credits = user.credits or 0
+    if current_credits < cost:
+        raise _insufficient_credits(current=current_credits, need=cost)
+
     init_params = {
         "request": {k: v for k, v in payload.items() if k != "prompt"},
+        "cost": cost,
     }
     msg = await _create_pending_ai_msg(db, conv.id, init_params)
+    await db.flush()  # 拿 msg.id 给 CreditTransaction.ref_id 引用
+    await _charge_credits(db, user, cost, msg.id, reason="generate")
     await db.commit()
     await db.refresh(msg)
 
     # 启动后台任务（与请求生命周期解耦；持有强引用避免被 GC）
     _spawn_background_task(
-        _run_generate_task(msg.id, conv.id, payload, action_label="已生成")
+        _run_generate_task(
+            msg.id, conv.id, payload,
+            action_label="已生成",
+            user_id=user.id, cost=cost,
+        )
     )
 
     return JSONResponse(content=_to_msg_out(msg).model_dump(mode="json"))
@@ -274,8 +380,10 @@ async def _run_edit_task(
     conv_id: int,
     fields: dict[str, Any],
     files: list[tuple[str, tuple[str, bytes, str]]],
+    user_id: int,
+    cost: int,
 ) -> None:
-    """后台任务：调上游 edit，回写 message"""
+    """后台任务：调上游 edit，回写 message。失败时退款。"""
     factory = get_session_factory()
     try:
         upstream_json = await call_images_edit(fields, files)
@@ -283,18 +391,21 @@ async def _run_edit_task(
         await _finalize_message(
             factory, ai_msg_id, conv_id, ok=False, text=f"失败：上游超时 ({e})"
         )
+        await _refund_credits(factory, user_id, ai_msg_id, cost, f"上游超时 ({e})")
         return
     except UpstreamError as e:
         await _finalize_message(
             factory, ai_msg_id, conv_id, ok=False,
             text=f"失败：upstream_error：{e}",
         )
+        await _refund_credits(factory, user_id, ai_msg_id, cost, f"upstream_error: {e}")
         return
     except Exception as e:  # noqa: BLE001
         logger.exception("edit task 异常 ai_msg_id=%s", ai_msg_id)
         await _finalize_message(
             factory, ai_msg_id, conv_id, ok=False, text=f"失败：{e}"
         )
+        await _refund_credits(factory, user_id, ai_msg_id, cost, f"task 异常: {e}")
         return
 
     urls, usage, n_imgs = _parse_upstream_images(
@@ -385,6 +496,12 @@ async def edit(
     # 鉴权 + 会话归属校验
     conv = await _load_owned_conv(db, user.id, conversation_id)
 
+    # 预扣积分（与 pending msg 同事务）
+    cost = _calculate_cost(n)
+    current_credits = user.credits or 0
+    if current_credits < cost:
+        raise _insufficient_credits(current=current_credits, need=cost)
+
     fields: dict[str, Any] = {
         "model": upstream_model,
         "prompt": prompt,
@@ -399,12 +516,17 @@ async def edit(
     init_params = {
         "mode": "edit",
         "request": {k: v for k, v in fields.items() if k != "prompt"},
+        "cost": cost,
     }
     msg = await _create_pending_ai_msg(db, conv.id, init_params)
+    await db.flush()  # 拿 msg.id
+    await _charge_credits(db, user, cost, msg.id, reason="edit")
     await db.commit()
     await db.refresh(msg)
 
-    _spawn_background_task(_run_edit_task(msg.id, conv.id, fields, files))
+    _spawn_background_task(
+        _run_edit_task(msg.id, conv.id, fields, files, user_id=user.id, cost=cost)
+    )
     _ = model  # 显式吸收 unused 参数避免 lint
 
     return JSONResponse(content=_to_msg_out(msg).model_dump(mode="json"))
