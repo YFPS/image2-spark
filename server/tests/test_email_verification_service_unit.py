@@ -74,5 +74,57 @@ class EmailProviderTests(unittest.TestCase):
             get_settings.cache_clear()
 
 
+class EmailVerificationPureFunctionTests(unittest.TestCase):
+    """email_verification_service 中纯函数（hash/url）行为。"""
+
+    def test_hash_verification_token_is_sha256_hex(self):
+        from app.email_verification_service import hash_verification_token
+
+        # 已知值：sha256('abc') = ba7816bf...
+        self.assertEqual(
+            hash_verification_token("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        )
+
+    def test_build_verify_url_adds_token_query(self):
+        from app.email_verification_service import build_verify_url
+
+        self.assertEqual(
+            build_verify_url("https://example.com/verify-email", "abc123"),
+            "https://example.com/verify-email?token=abc123",
+        )
+
+    def test_build_verify_url_appends_when_query_exists(self):
+        from app.email_verification_service import build_verify_url
+
+        self.assertEqual(
+            build_verify_url("https://example.com/v?lang=zh", "abc"),
+            "https://example.com/v?lang=zh&token=abc",
+        )
+
+    def test_require_verified_user_blocks_unverified(self):
+        from fastapi import HTTPException
+        from app.email_verification_service import require_verified_user
+
+        class _U:
+            email_verified_at = None
+
+        with self.assertRaises(HTTPException) as ctx:
+            require_verified_user(_U())  # type: ignore[arg-type]
+        self.assertEqual(ctx.exception.status_code, 403)
+        self.assertEqual(ctx.exception.detail["error"]["code"], "email_not_verified")
+
+    def test_require_verified_user_passes_when_verified(self):
+        from datetime import datetime, timezone
+
+        from app.email_verification_service import require_verified_user
+
+        class _U:
+            email_verified_at = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+
+        # 不抛即视为通过
+        require_verified_user(_U())  # type: ignore[arg-type]
+
+
 if __name__ == "__main__":
     unittest.main()
