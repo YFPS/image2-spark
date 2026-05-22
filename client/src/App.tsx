@@ -12,7 +12,6 @@
  *       因此节点内部布局调整不会让连线错位（单一真相源）。
  */
 import type {
-  ButtonHTMLAttributes,
   MouseEvent as ReactMouseEvent,
   ReactNode,
   RefObject,
@@ -210,7 +209,7 @@ const PORT_HIT_R = 16;
 
 /* ---------- App ---------- */
 export default function App() {
-  const [mode, setMode] = useState<AppMode>("generate");
+  const [mode] = useState<AppMode>("generate");
   const [instances, setInstances] = useState<NodeInstance[]>(INITIAL_INSTANCES);
   const [selectedId, setSelectedId] = useState<string>("model-1");
   const [glassParams, setGlassParams] = useState<GlassParams>(() => loadStoredParams());
@@ -420,7 +419,7 @@ export default function App() {
         <GlassControls params={glassParams} onChange={setGlassParams} />
       )}
 
-      <TopBarReplica mode={mode} onModeChange={setMode} />
+      <TopBarReplica />
 
       {mode === "generate" ? (
         <SimpleGenerateView onShapesChange={setGenerateGlassShapes} />
@@ -2257,173 +2256,10 @@ function rectToGlassShape(rect: DOMRect): GlassShape {
   };
 }
 
-/* ---------- 顶部条（按参考图 1:1 复刻） ---------- */
-function TopBarReplica({
-  mode,
-  onModeChange,
-}: {
-  mode: AppMode;
-  onModeChange: (mode: AppMode) => void;
-}) {
+/* ---------- 顶部条占位（76px 高度，保留以维持下方布局；切换模式按钮已隐藏） ---------- */
+function TopBarReplica() {
   return (
-    <header className="relative z-30 flex h-[76px] items-start px-3 pt-3">
-      <nav className="flex items-center gap-1.5">
-        <TopBarTab onClick={() => onModeChange(mode === "generate" ? "workflow" : "generate")}>
-          切换模式
-        </TopBarTab>
-      </nav>
-    </header>
-  );
-
-  return (
-    <header className="relative z-30 flex h-14 items-center gap-3 px-6">
-      {/* 左：螺旋 logo + Workflow/Edit/Help 胶囊 */}
-      <Logo />
-      <PillTab active>工作流</PillTab>
-      <PillTab>编辑</PillTab>
-      <PillTab>帮助</PillTab>
-
-      {/* 中：项目 tab 导航（绝对居中，不受左右占位影响） */}
-      <div className="absolute left-1/2 flex -translate-x-1/2 items-center gap-2">
-        <SquareBtn aria-label="上一个项目">
-          <Chevron dir="left" />
-        </SquareBtn>
-        <button className="flex items-center gap-2 rounded-full border border-white/[0.04] bg-[#1e1e22] px-4 py-2 text-[13px] font-medium text-white/85 hover:bg-[#23232a]">
-          Black bear
-          <span className="text-white/35">×</span>
-        </button>
-        <SquareBtn aria-label="下一个项目">
-          <Chevron dir="right" />
-        </SquareBtn>
-      </div>
-
-      {/* 右：运行控制集群 */}
-      <div className="ml-auto flex items-center gap-2">
-        <SquareBtn aria-label="更多">
-          <DotsVertical />
-        </SquareBtn>
-        <QueueButton />
-        <VStepper />
-        <SquareBtn aria-label="关闭">
-          <span className="text-[15px] leading-none text-white/65">×</span>
-        </SquareBtn>
-        <SquareBtn aria-label="截图">
-          <CameraIcon />
-        </SquareBtn>
-        <SquareBtn aria-label="菜单">
-          <span className="text-[14px] leading-none text-white/65">≡</span>
-        </SquareBtn>
-      </div>
-    </header>
-  );
-}
-
-/* 抽象螺旋 logo —— 单色描边 */
-function topBarSurface(active = false) {
-  return [
-    "border border-white/[0.03] bg-[#222225] text-white/78 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)]",
-    "transition-colors hover:bg-[#29292d] hover:text-white/92",
-    active ? "bg-[#262629] text-white/95" : "",
-  ].join(" ");
-}
-
-function TopBarTab({
-  children,
-  active = false,
-  onClick,
-}: {
-  children: ReactNode;
-  active?: boolean;
-  onClick?: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={`h-12 min-w-[110px] rounded-[10px] px-6 text-[13px] font-medium ${topBarSurface(active)}`}
-    >
-      {children}
-    </button>
-  );
-}
-
-function Logo() {
-  return (
-    <div className="mr-2 grid h-10 w-10 place-items-center">
-      <svg width="28" height="28" viewBox="0 0 28 28" className="text-white">
-        <path
-          d="M 14 3.5 A 10.5 10.5 0 1 1 3.5 14 A 7 7 0 1 1 14 21 A 3.5 3.5 0 0 1 10.5 17.5"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.4"
-          strokeLinecap="round"
-        />
-      </svg>
-    </div>
-  );
-}
-
-// 顶栏按钮统一灰卡风格 —— 与内层 #1E1E22 卡片完全一致：实色 + hairline，无浮雕、无投影
-/* 标签胶囊（Workflow/Edit/Help）*/
-function PillTab({ children, active = false }: { children: ReactNode; active?: boolean }) {
-  return (
-    <button
-      className={
-        "rounded-full border border-white/[0.04] px-5 py-2 text-[13px] font-medium transition-colors " +
-        (active
-          ? "bg-[#26262a] text-white/95"
-          : "bg-[#1e1e22] text-white/75 hover:bg-[#23232a] hover:text-white/95")
-      }
-    >
-      {children}
-    </button>
-  );
-}
-
-/* 小方按钮（图标用）*/
-function SquareBtn({
-  children,
-  ...rest
-}: { children: ReactNode } & ButtonHTMLAttributes<HTMLButtonElement>) {
-  return (
-    <button
-      {...rest}
-      className="grid h-9 w-9 place-items-center rounded-[10px] border border-white/[0.04] bg-[#1e1e22] text-white/70 hover:bg-[#23232a] hover:text-white"
-    >
-      {children}
-    </button>
-  );
-}
-
-/* Queue 胶囊：▶ + 文字 + ⌄ */
-function QueueButton() {
-  return (
-    <button className="flex items-center gap-2 rounded-full border border-white/[0.04] bg-[#1e1e22] px-4 py-2 text-[13px] font-medium text-white/90 hover:bg-[#23232a]">
-      <svg width="11" height="11" viewBox="0 0 11 11" className="text-white/95">
-        <path d="M 2 1.5 L 9.5 5.5 L 2 9.5 Z" fill="currentColor" />
-      </svg>
-      <span>队列</span>
-      <Chevron dir="down" className="text-white/45" />
-    </button>
-  );
-}
-
-/* 竖向小步进器（上下两个小箭头）*/
-function VStepper() {
-  return (
-    <div className="flex flex-col gap-[1px] overflow-hidden rounded-[8px] border border-white/[0.04] bg-[#1e1e22]">
-      <button
-        aria-label="上一步"
-        className="grid h-[17px] w-6 place-items-center text-white/55 hover:bg-white/[0.05] hover:text-white"
-      >
-        <Chevron dir="up" size={8} />
-      </button>
-      <button
-        aria-label="下一步"
-        className="grid h-[17px] w-6 place-items-center text-white/55 hover:bg-white/[0.05] hover:text-white"
-      >
-        <Chevron dir="down" size={8} />
-      </button>
-    </div>
+    <header className="relative z-30 flex h-[76px] items-start px-3 pt-3" />
   );
 }
 
@@ -2446,27 +2282,6 @@ function Chevron({
   return (
     <svg width={size * 1.2} height={size * 1.2} viewBox="0 0 12 12" className={className}>
       <path d={paths[dir]} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-/* ⋮ 三个点（垂直） */
-function DotsVertical() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 14 14" className="text-white/65">
-      <circle cx="7" cy="3" r="1.1" fill="currentColor" />
-      <circle cx="7" cy="7" r="1.1" fill="currentColor" />
-      <circle cx="7" cy="11" r="1.1" fill="currentColor" />
-    </svg>
-  );
-}
-
-/* 相机图标 */
-function CameraIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 16 16" className="text-white/65">
-      <rect x="2" y="4" width="12" height="9" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
-      <circle cx="8" cy="8.5" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.2" />
     </svg>
   );
 }
