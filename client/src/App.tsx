@@ -19,6 +19,8 @@ import type {
 } from "react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { LiquidGlass, type GlassShape } from "./LiquidGlass";
+import { RecentWorksCard } from "./components/RecentWorksCard";
+import { useRecentWorks } from "./hooks/useRecentWorks";
 import { GlassControls, loadStoredParams, type GlassParams } from "./GlassControls";
 import {
   generateImages,
@@ -524,6 +526,7 @@ function SimpleGenerateView({
   onShapesChange: (shapes: GlassShape[]) => void;
 }) {
   const { user } = useAuth();
+  const recentWorks = useRecentWorks();
   // 七张外层玻璃壳：左侧栏、参考图、参数、结果、最近作品、AI 对话、历史时间轴
   const sidebarRef = useRef<HTMLDivElement | null>(null);
   const referenceCardRef = useRef<HTMLDivElement | null>(null);
@@ -566,6 +569,28 @@ function SimpleGenerateView({
     size?: string;
   };
   const conversations = useConversations();
+  // 监听当前会话内 AI done 计数上涨 → 实时刷新最近作品
+  // 切换会话时（convId 变化）只更新基线、不触发 refresh
+  const recentWorksDoneRef = useRef<{ convId: number | null; count: number }>({
+    convId: null,
+    count: 0,
+  });
+  useEffect(() => {
+    const currentConv = conversations.current;
+    const convId = currentConv?.id ?? null;
+    const doneCount = (currentConv?.messages ?? []).filter(
+      (m) =>
+        m.role === "ai" &&
+        m.status === "done" &&
+        (m.image_urls?.length ?? 0) > 0,
+    ).length;
+
+    const prev = recentWorksDoneRef.current;
+    if (prev.convId === convId && doneCount > prev.count) {
+      void recentWorks.refresh();
+    }
+    recentWorksDoneRef.current = { convId, count: doneCount };
+  }, [conversations.current, recentWorks]);
   const [pendingBubble, setPendingBubble] = useState<ChatMsg | null>(null);
   const DEFAULT_GREET: ChatMsg = {
     id: "greet",
@@ -1385,28 +1410,10 @@ function SimpleGenerateView({
         </div>
 
         {/* 最近作品横滑 */}
-        <div
+        <RecentWorksCard
           ref={recentCardRef}
-          className="flex shrink-0 flex-col rounded-[28px] p-4"
-        >
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-[12px] font-medium text-white/82">最近作品</span>
-            <button className="text-[11px] text-white/45 hover:text-white/72">查看全部</button>
-          </div>
-          <div className="flex gap-3 overflow-x-auto pb-1 [scrollbar-color:rgba(255,255,255,0.16)_transparent] [scrollbar-width:thin] [scrollbar-gutter:stable]">
-            {["刚刚", "2 小时前", "昨天", "2 天前", "3 天前"].map((t) => (
-              <div
-                key={t}
-                className="relative h-[84px] w-[120px] shrink-0 overflow-hidden rounded-[14px] border border-white/[0.05] bg-[#111114]"
-              >
-                <DemoBearArtwork />
-                <span className="absolute left-2 top-2 rounded-full bg-black/55 px-2 py-0.5 text-[10px] text-white/82">
-                  {t}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
+          onPreview={(src) => setPreviewSrc(src)}
+        />
 
         </div>
         )}
