@@ -17,7 +17,7 @@
 `client/src/App.tsx` 当前的修改（edit）流有三个体验断点：
 
 1. **聊天里的 AI 出图无法被复用为"修改起点"**：用户看到一张图想继续改，只能去左侧"参考图"卡重新上传——而那张图就在 chat bubble 里。
-2. **聊天输入框只接文字**：没有 `onPaste`、没有 `onDrop`、没有图片按钮。用户从别的网页 Ctrl+C 一张图想 Ctrl+V 直接当参考图——做不到。
+2. **聊天输入框只接文字 + 单行 + 不可放大**：当前是 `<input>` 单行（`App.tsx:1563`）——没有 `onPaste`、没有 `onDrop`、没法多行（长 prompt 看不全）、没法拖右下角放大。用户从别的网页 Ctrl+C 一张图想 Ctrl+V 当参考图——做不到；想写大段 prompt——一行内滚屏不直观。
 3. **`lastResultSrc` 是 in-memory state 刷新即丢**（`App.tsx:641`）：
    - 生图成功时 `setLastResultSrc(url)` 写入
    - 切「修改」模式时若无 `refImages`，降级用 `lastResultSrc`（`App.tsx:773`）
@@ -76,7 +76,18 @@ onEditFromImage={(src) => handleSetAsEditTarget(src)}
 3. `handleModeChange("edit")` —— 切修改模式（沿用现有 mode 切换 helper）
 4. 聚焦输入框：`chatInputRef.current?.focus()`（需要给 textarea 加 ref）
 
-### 3.2 改 B：聊天输入框支持粘贴 + 拖拽 + 视觉态
+### 3.2 改 B：input → textarea 升级 + 粘贴/拖拽 + 视觉态
+
+**第一步 HTML 改造（必须先做，前提）**：把 `App.tsx:1563` 的 `<input>` 换为 `<textarea>`：
+
+- 默认 1 行高（`rows={1}`、`min-h-[36px]`）
+- 允许垂直拖拽放大（`resize-y`）
+- 最大高度 240px（`max-h-[240px]` + `overflow-y-auto`），避免拉到把整个 chat 面板顶飞
+- 移除 input 的 `disabled` 时的滚动 reset，textarea 用同样 disabled 样式
+- `onKeyDown` 改为：
+  - `Enter`（无修饰）→ 提交（与现状一致）
+  - `Shift+Enter` → 在 textarea 内插入换行（textarea 默认行为，不 preventDefault）
+  - 其他按键沿用默认
 
 **HTML 改动**：
 - 给输入条根 div 加 `onDragEnter` / `onDragOver` / `onDragLeave` / `onDrop`
@@ -177,7 +188,13 @@ const handleDrop = async (e: React.DragEvent) => {
 
 **目的**：用户在聊天里看到「当前修改起点是这张图」——比左侧卡的间接关联更直观。两处共享同一份 `refImages` state，删一处另一处也更新。
 
-### 3.5 抽出小组件（DRY + 可读性）
+### 3.5 textarea 自适应高度（可选 nice-to-have）
+
+**默认行为**：用户拖右下角手动 resize（CSS `resize-y` 已经支持，无需 JS）。
+
+**进阶（不在本期，YAGNI）**：根据内容自动撑高（auto-grow），可用 `useLayoutEffect` 监听 `chatInput` 变化、设 `el.style.height = "auto"; el.style.height = el.scrollHeight + "px"`。但与"用户手动拖"冲突——一旦用户拖了，自动 grow 会盖掉用户的尺寸。需要 sticky 状态判定。本期**不做**自动 grow，**只做手动 resize**。
+
+### 3.6 抽出小组件（DRY + 可读性）
 
 为避免 App.tsx 再膨胀 100+ 行，抽两个小辅助：
 
@@ -276,10 +293,12 @@ cd D:/webProject/image2/client && npm run dev
 - [ ] 新增 `client/src/utils/imageInput.ts`（`extractImageFilesFromEvent` / `fileToDataURL` / `REF_MAX` 导出）
 - [ ] 新增 `client/src/components/RefImagesStrip.tsx`（输入框上方缩略图横条）
 - [ ] `client/src/App.tsx`：
+  - **`<input>` → `<textarea>`**（`App.tsx:1563`）：`rows={1}` / `min-h-[36px]` / `max-h-[240px]` / `resize-y` / `overflow-y-auto`
+  - onKeyDown：`Enter` 提交、`Shift+Enter` 换行
   - 删 `useState<string|null>(null)` 的 `lastResultSrc`，改 `useMemo` 派生
   - grep 删所有 `setLastResultSrc(...)` 调用
   - `refImages` / `refMaskBlob` 维持现状
-  - 新增 `chatInputRef`、`chatDragOver` state
+  - 新增 `chatInputRef`（指向 textarea）、`chatDragOver` state
   - `handleSetAsEditTarget(src)` 新函数
   - 聊天输入条：根 div 加 onDragEnter/Over/Leave/Drop + 高亮态 + 上方插 `<RefImagesStrip>`
   - textarea 加 `onPaste` + `ref={chatInputRef}`
