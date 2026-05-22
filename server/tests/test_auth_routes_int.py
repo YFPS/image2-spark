@@ -345,6 +345,43 @@ class AuthRoutesIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.json()["error"]["code"], "verification_token_invalid")
 
+    async def test_unverified_user_cannot_generate(self):
+        """未验证用户调 /api/images/generate 返回 403 email_not_verified，不消耗上游。"""
+        email = self._track(_rand_email())
+        reg = await self.client.post(
+            "/api/auth/register", json={"email": email, "password": "abc12345"}
+        )
+        self.assertEqual(reg.status_code, 201, reg.text)
+        token = reg.json()["access_token"]
+        # 验证 verification_required 确实是 True（注册后未验证）
+        self.assertTrue(reg.json()["user"]["verification_required"])
+
+        # 建一个 conversation；conversations 路由不挂 verified 闸
+        conv = await self.client.post(
+            "/api/conversations",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"title": "verify guard"},
+        )
+        self.assertEqual(conv.status_code, 201, conv.text)
+        cid = conv.json()["id"]
+
+        r = await self.client.post(
+            f"/api/images/generate?conversation_id={cid}",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "prompt": "test",
+                "model": "gpt-image-2",
+                "size": "auto",
+                "quality": "low",
+                "n": 1,
+                "background": "auto",
+                "output_format": "png",
+                "moderation": "auto",
+            },
+        )
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertEqual(r.json()["detail"]["error"]["code"], "email_not_verified")
+
 
 if __name__ == "__main__":
     unittest.main()

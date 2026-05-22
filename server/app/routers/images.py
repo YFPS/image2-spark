@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import get_settings
 from ..db import get_db, get_session_factory
 from ..deps import get_current_user
+from ..email_verification_service import require_verified_user
 from ..models import Conversation, Message, User
 from ..openai_client import (
     UpstreamError,
@@ -229,6 +230,8 @@ async def generate(
     """文本生图（任务化）：
     立即落库一条 pending ai message，启动后台 task 调上游，前端拿 message 后开始轮询。
     """
+    # 未验证邮箱用户不允许触发上游 API key 消耗
+    require_verified_user(user)
     upstream_model = "gpt-image-2"
     payload: dict[str, Any] = {
         "model": upstream_model,
@@ -327,6 +330,8 @@ async def edit(
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Inpainting / 多参考图编辑（任务化）：行为同 /generate"""
+    # verified 闸放最前，避免未验证用户上传 multipart 字节
+    require_verified_user(user)
     api_size = size.replace("×", "x")
     upstream_model = "gpt-image-2"
 
