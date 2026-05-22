@@ -128,6 +128,10 @@ class UserPublic(BaseModel):
     role: UserRoleT
     avatar_url: str | None = None
     credits: int
+    # 邮箱验证时间；NULL 表示尚未验证
+    email_verified_at: datetime | None = None
+    # 派生字段，方便前端不重复算
+    verification_required: bool = False
     last_login_at: datetime | None = None
     created_at: datetime
 
@@ -137,6 +141,20 @@ class TokenResponse(BaseModel):
     token_type: Literal["Bearer"] = "Bearer"
     expires_in: int  # 秒
     user: UserPublic
+    # 注册接口用：邮件 provider 临时故障时仍 201，但标 false 让前端提示重发
+    verification_email_sent: bool = True
+
+
+class VerifyEmailRequest(BaseModel):
+    """验证邮箱：明文 token 从邮件链接 query 中取出。"""
+
+    token: str = Field(min_length=16, max_length=256)
+
+
+class ResendVerificationRequest(BaseModel):
+    """重发验证邮件：仅需邮箱。响应固定 ok，无论邮箱是否存在/已验证。"""
+
+    email: EmailStr
 
 
 # ===== AI 对话历史 =====

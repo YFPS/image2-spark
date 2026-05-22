@@ -21,6 +21,9 @@ from dotenv import load_dotenv
 
 load_dotenv()  # 读 server/.env
 
+# 集成测试不发真实邮件：用 null provider 记录调用即可
+os.environ["EMAIL_PROVIDER"] = "null"
+
 # 用专用 Redis DB 15 跑测试，不干扰开发用的 DB 0
 _redis_test_url = os.getenv("REDIS_URL_TEST")
 if not _redis_test_url:
@@ -41,9 +44,9 @@ if _DB_OK and _REDIS_OK and _JWT_OK:
     import httpx  # noqa: E402
     from sqlalchemy import delete  # noqa: E402
 
-    from app.db import get_session_factory  # noqa: E402
+    from app.db import get_engine, get_session_factory  # noqa: E402
     from app.main import app  # noqa: E402
-    from app.models import CreditTransaction, User  # noqa: E402
+    from app.models import CreditTransaction, EmailVerificationToken, User  # noqa: E402
     from app.redis_client import get_redis  # noqa: E402
 
 
@@ -57,6 +60,13 @@ class AuthRoutesIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.created_emails = []
+        # IsolatedAsyncioTestCase 给每个用例新事件循环；
+        # 但 get_engine() / get_redis() 是 lru_cache 单例，会保留上一个 loop 的连接。
+        # 这里强清缓存，确保 client 绑到当前 loop。
+        get_engine.cache_clear()
+        get_session_factory.cache_clear()
+        get_redis.cache_clear()
+
         # 清 Redis test DB
         redis = get_redis()
         await redis.flushdb()
@@ -67,7 +77,7 @@ class AuthRoutesIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.client.__aenter__()
 
     async def asyncTearDown(self) -> None:
-        # 删测试创建的 user + 流水（按邮箱）
+        # 删测试创建的 user + 流水 + 邮箱验证 token（按邮箱）
         if self.created_emails:
             factory = get_session_factory()
             async with factory() as s:
@@ -76,10 +86,16 @@ class AuthRoutesIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 )
                 ids = [r.id for r in rows.fetchall()]
                 if ids:
+                    await s.execute(
+                        delete(EmailVerificationToken).where(EmailVerificationToken.user_id.in_(ids))
+                    )
                     await s.execute(delete(CreditTransaction).where(CreditTransaction.user_id.in_(ids)))
                     await s.execute(delete(User).where(User.id.in_(ids)))
                     await s.commit()
         await self.client.__aexit__(None, None, None)
+        # 主动释放 engine/redis，避免 loop 关闭时还有挂起连接
+        await get_engine().dispose()
+        await get_redis().aclose()
 
     def _track(self, email: str) -> str:
         self.created_emails.append(email.lower().strip())
@@ -87,7 +103,8 @@ class AuthRoutesIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     # ============ 注册 ============
 
-    async def test_register_success_grants_credits_and_writes_ledger(self):
+    async def test_register_success_creates_unverified_user_without_bonus(self):
+        """注册成功：用户处于未验证态、credits=0、不写 signup_bonus 流水。"""
         email = self._track(_rand_email())
         r = await self.client.post(
             "/api/auth/register",
@@ -96,10 +113,13 @@ class AuthRoutesIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 201, r.text)
         body = r.json()
         self.assertIn("access_token", body)
+        self.assertEqual(body["verification_email_sent"], True)
         self.assertEqual(body["user"]["email"], email.lower())
-        self.assertEqual(body["user"]["credits"], 5)
+        self.assertEqual(body["user"]["credits"], 0)
         self.assertEqual(body["user"]["role"], "user")
-        # 流水表应有一条 signup_bonus
+        self.assertIsNone(body["user"]["email_verified_at"])
+        self.assertEqual(body["user"]["verification_required"], True)
+        # 不应该立即有 signup_bonus 流水
         factory = get_session_factory()
         async with factory() as s:
             row = (await s.execute(
@@ -107,10 +127,7 @@ class AuthRoutesIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     CreditTransaction.user_id == body["user"]["id"]
                 )
             )).fetchone()
-            self.assertIsNotNone(row)
-            self.assertEqual(row.reason, "signup_bonus")
-            self.assertEqual(row.delta, 5)
-            self.assertEqual(row.balance_after, 5)
+            self.assertIsNone(row)
 
     async def test_register_duplicate_email_409(self):
         email = self._track(_rand_email())
@@ -184,7 +201,8 @@ class AuthRoutesIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["error"]["code"], "too_many_attempts")
         self.assertIn("lock_remaining", body["error"])
 
-    async def test_disabled_user_login_403(self):
+    async def test_disabled_user_login_returns_invalid_credentials(self):
+        """P2 修补：disabled 用户登录返回 401 invalid_credentials，不暴露账号状态。"""
         email = self._track(_rand_email())
         await self.client.post("/api/auth/register", json={"email": email, "password": "abc12345"})
         # 直接改 DB 把账号封了
@@ -196,8 +214,8 @@ class AuthRoutesIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
             await s.commit()
         r = await self.client.post("/api/auth/login", json={"email": email, "password": "abc12345"})
-        self.assertEqual(r.status_code, 403)
-        self.assertEqual(r.json()["error"]["code"], "account_disabled")
+        self.assertEqual(r.status_code, 401)
+        self.assertEqual(r.json()["error"]["code"], "invalid_credentials")
 
     # ============ /me + logout ============
 

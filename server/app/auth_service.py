@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import get_settings
-from .models import CreditTransaction, User
+from .models import User
 
 # ===== 密码 =====
 
@@ -160,8 +160,10 @@ async def register_user(
     password: str,
     nickname: str | None,
 ) -> User:
-    """注册 + 同事务赠送积分。任何一步失败回滚。"""
-    settings = get_settings()
+    """注册：不立即发放 signup bonus，待邮箱验证成功后再发。
+
+    本函数只 flush，不 commit；路由层在创建验证 token 后统一 commit。
+    """
     email_norm = normalize_email(email)
     nick = (nickname or email_norm.split("@", 1)[0])[:32].strip() or email_norm.split("@", 1)[0]
     user = User(
@@ -169,7 +171,7 @@ async def register_user(
         password_hash=hash_password(password),
         nickname=nick,
         role="user",
-        credits=settings.signup_bonus_credits,
+        credits=0,
     )
     session.add(user)
     try:
@@ -177,18 +179,6 @@ async def register_user(
     except IntegrityError as e:
         await session.rollback()
         raise AuthError("email_taken", http_status=409) from e
-
-    # 写赠送流水
-    tx = CreditTransaction(
-        user_id=user.id,
-        delta=settings.signup_bonus_credits,
-        balance_after=settings.signup_bonus_credits,
-        reason="signup_bonus",
-        note="新用户注册赠送",
-    )
-    session.add(tx)
-    await session.commit()
-    await session.refresh(user)
     return user
 
 
@@ -218,8 +208,11 @@ async def authenticate(
         raise AuthError("invalid_credentials", http_status=401)
 
     if user.disabled:
-        # 封号不计入失败次数（你密码是对的）
-        raise AuthError("account_disabled", http_status=403)
+        # P2 修补侧信道：disabled 用户和密码错误用同一错误码与状态码，
+        # 攻击者拿到"密码正确但被禁"的信号无从区分。
+        # 仍计入失败次数，与正常密码错误路径行为一致。
+        await record_login_failure(redis, email_norm)
+        raise AuthError("invalid_credentials", http_status=401)
 
     await clear_login_failure(redis, email_norm)
     user.last_login_at = datetime.now(tz=timezone.utc)

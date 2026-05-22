@@ -17,17 +17,27 @@ from ..auth_service import (
     blacklist_token,
     create_jwt,
     decode_jwt,
+    normalize_email,
     register_user,
 )
 from ..db import get_db
 from ..deps import get_current_user
+from ..email_verification_service import (
+    VerificationError,
+    create_verification_token,
+    resend_verification,
+    send_verification_email,
+    verify_email_token,
+)
 from ..models import User
 from ..redis_client import get_redis
 from ..schemas import (
     LoginRequest,
     RegisterRequest,
+    ResendVerificationRequest,
     TokenResponse,
     UserPublic,
+    VerifyEmailRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +53,8 @@ def _user_public(u: User) -> UserPublic:
         role=u.role,
         avatar_url=u.avatar_url,
         credits=u.credits,
+        email_verified_at=u.email_verified_at,
+        verification_required=u.email_verified_at is None,
         last_login_at=u.last_login_at,
         created_at=u.created_at,
     )
@@ -62,23 +74,71 @@ async def register(
     req: RegisterRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    """注册：积分 0，先建 user + 验证 token，提交后发邮件。
+
+    邮件发送失败不回滚事务：用户已建好，response 标记 verification_email_sent=false 让前端提示重发。
+    """
     try:
         user = await register_user(
             db, email=req.email, password=req.password, nickname=req.nickname
         )
+        token_plain = await create_verification_token(db, user)
+        await db.commit()
+        await db.refresh(user)
     except AuthError as e:
         return _auth_error_response(e)
 
-    token, exp_in, _jti = create_jwt(user_id=user.id, email=user.email, role=user.role)
+    verification_email_sent = True
+    try:
+        await send_verification_email(user, token_plain)
+    except Exception:  # noqa: BLE001
+        # provider 故障不影响注册成功；前端可走重发入口
+        logger.exception("发送验证邮件失败 user_id=%s", user.id)
+        verification_email_sent = False
+
+    jwt_token, exp_in, _jti = create_jwt(
+        user_id=user.id, email=user.email, role=user.role
+    )
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
         content=TokenResponse(
-            access_token=token,
+            access_token=jwt_token,
             token_type="Bearer",
             expires_in=exp_in,
             user=_user_public(user),
+            verification_email_sent=verification_email_sent,
         ).model_dump(mode="json"),
     )
+
+
+@router.post("/verify-email")
+async def verify_email(
+    req: VerifyEmailRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """消费验证 token：把 user 置为已验证并按需发放 signup bonus。"""
+    try:
+        user = await verify_email_token(db, req.token)
+    except VerificationError as e:
+        return JSONResponse(
+            status_code=e.http_status,
+            content={"error": {"code": e.code, "message": e.code}},
+        )
+    return {"ok": True, "user": _user_public(user).model_dump(mode="json")}
+
+
+@router.post("/resend-verification")
+async def resend_verification_email(
+    req: ResendVerificationRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """重发验证邮件。对外固定 ok，避免邮箱存在性枚举。"""
+    try:
+        await resend_verification(db, normalize_email(req.email))
+    except Exception:  # noqa: BLE001
+        # 任何内部错误都吞掉；防止泄露邮箱状态。日志侧仍记录便于排查。
+        logger.exception("重发验证邮件失败")
+    return {"ok": True}
 
 
 @router.post("/login", response_model=TokenResponse)
