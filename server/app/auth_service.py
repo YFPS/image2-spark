@@ -51,7 +51,8 @@ def create_jwt(*, user_id: int, email: str, role: str) -> tuple[str, int, str]:
     if not settings.jwt_secret:
         raise RuntimeError("JWT_SECRET 未配置")
     now = datetime.now(tz=timezone.utc)
-    exp = now + timedelta(days=settings.jwt_exp_days)
+    # 按小时计算有效期（默认 24h，可由 JWT_EXP_HOURS 配置；旧 JWT_EXP_DAYS 也兼容）
+    exp = now + timedelta(hours=settings.jwt_exp_hours)
     jti = uuid.uuid4().hex
     payload = {
         "sub": str(user_id),

@@ -43,13 +43,22 @@ class Settings:
         )
 
         # ===== auth-foundation =====
+        # 运行环境：development / production；生产时启动校验更严
+        self.app_env: str = os.getenv("APP_ENV", "development").strip().lower() or "development"
         # MySQL 异步连接串：mysql+asyncmy://user:pass@host:3306/image2?charset=utf8mb4
         self.database_url: str = os.getenv("DATABASE_URL", "").strip()
         # Redis 连接串：redis://host:port/db
         self.redis_url: str = os.getenv("REDIS_URL", "").strip()
         # JWT 签名密钥（HS256），必填，建议 64 字符以上随机串
         self.jwt_secret: str = os.getenv("JWT_SECRET", "").strip()
-        self.jwt_exp_days: int = int(os.getenv("JWT_EXP_DAYS", "7"))
+        # JWT 默认有效期：优先 JWT_EXP_HOURS（小时），回退 JWT_EXP_DAYS（天）以兼容旧 env
+        raw_jwt_hours = os.getenv("JWT_EXP_HOURS")
+        if raw_jwt_hours is not None and raw_jwt_hours.strip():
+            self.jwt_exp_hours: int = int(raw_jwt_hours)
+        else:
+            self.jwt_exp_hours = int(os.getenv("JWT_EXP_DAYS", "1")) * 24
+        # 旧代码可能仍读 jwt_exp_days，按小时回推一个粗略天数，避免崩
+        self.jwt_exp_days: int = max(1, self.jwt_exp_hours // 24)
         self.bcrypt_rounds: int = int(os.getenv("BCRYPT_ROUNDS", "12"))
         # 新用户注册赠送积分（1 积分 ≈ 1 张普通生图，扣费规则下期定）
         self.signup_bonus_credits: int = int(os.getenv("SIGNUP_BONUS_CREDITS", "5"))
@@ -78,6 +87,50 @@ class Settings:
 
         # 上传字节硬限（10 MB），edit / brush-cutout 单文件不可超
         self.upload_max_bytes: int = int(os.getenv("UPLOAD_MAX_BYTES", str(10 * 1024 * 1024)))
+
+        # ===== 邮箱验证 / 邮件 provider（auth P2） =====
+        # provider 选择：smtp（QQ/腾讯 SMTP，生产默认）/ console（开发期写日志）/ null（测试用）
+        self.email_provider: str = (
+            os.getenv("EMAIL_PROVIDER", "console").strip().lower() or "console"
+        )
+        # 邮件发件人显示信息
+        self.email_from_address: str = os.getenv("EMAIL_FROM_ADDRESS", "").strip()
+        self.email_from_alias: str = (
+            os.getenv("EMAIL_FROM_ALIAS", "image2").strip() or "image2"
+        )
+        # 邮件中验证链接的 base URL（前端验证页）
+        self.email_verify_base_url: str = os.getenv(
+            "EMAIL_VERIFY_BASE_URL", "http://127.0.0.1:5173/verify-email"
+        ).strip()
+        self.email_verify_token_ttl_hours: int = int(
+            os.getenv("EMAIL_VERIFY_TOKEN_TTL_HOURS", "24")
+        )
+        self.email_resend_cooldown_seconds: int = int(
+            os.getenv("EMAIL_RESEND_COOLDOWN_SECONDS", "60")
+        )
+        self.email_verify_daily_limit: int = int(
+            os.getenv("EMAIL_VERIFY_DAILY_LIMIT", "5")
+        )
+        self.rate_limit_verify_email: str = os.getenv("RATE_LIMIT_VERIFY_EMAIL", "5/hour")
+        self.rate_limit_resend_verification: str = os.getenv(
+            "RATE_LIMIT_RESEND_VERIFICATION", "5/hour"
+        )
+
+        # ===== SMTP provider 配置（QQ 邮箱 / 腾讯企业邮）=====
+        # SMTP_USE_SSL=true 时走 465 SSL，否则走 STARTTLS
+        self.smtp_host: str = os.getenv("SMTP_HOST", "smtp.qq.com").strip() or "smtp.qq.com"
+        self.smtp_port: int = int(os.getenv("SMTP_PORT", "465"))
+        self.smtp_use_ssl: bool = os.getenv("SMTP_USE_SSL", "true").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        self.smtp_user: str = os.getenv("SMTP_USER", "").strip()
+        # QQ 邮箱 SMTP 必须用授权码，不是 QQ 密码
+        self.smtp_pass: str = os.getenv("SMTP_PASS", "")
+        # 不配置时 fallback 用 SMTP_USER 作为发件人
+        self.smtp_from: str = os.getenv("SMTP_FROM", "").strip() or self.smtp_user
+        self.smtp_from_name: str = (
+            os.getenv("SMTP_FROM_NAME", "").strip() or self.email_from_alias
+        )
 
         if not self.openai_api_key:
             # 不直接 raise，让健康检查仍可访问；调用时再报错

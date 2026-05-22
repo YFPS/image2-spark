@@ -103,5 +103,37 @@ class EmailNormalizationTests(unittest.TestCase):
             RegisterRequest(email="not-an-email", password="abc12345")
 
 
+class JwtTtlConfigTests(unittest.TestCase):
+    """JWT 有效期按小时配置；JWT_EXP_DAYS 为兼容旧 env 的回退。"""
+
+    def setUp(self):
+        get_settings.cache_clear()
+        os.environ["JWT_SECRET"] = "x" * 64
+
+    def tearDown(self):
+        os.environ.pop("JWT_EXP_HOURS", None)
+        # 保留默认 JWT_EXP_DAYS，避免影响后续单测
+        get_settings.cache_clear()
+
+    def test_jwt_exp_hours_controls_expires_in(self):
+        os.environ["JWT_EXP_HOURS"] = "24"
+        get_settings.cache_clear()
+        token, exp_in, _jti = create_jwt(user_id=9, email="ttl@example.com", role="user")
+        payload = decode_jwt(token)
+        self.assertEqual(payload["sub"], "9")
+        # 24h ≈ 86400s，允许 ±10s
+        self.assertGreaterEqual(exp_in, 86_390)
+        self.assertLessEqual(exp_in, 86_400)
+
+    def test_legacy_jwt_exp_days_is_still_read_when_hours_missing(self):
+        os.environ.pop("JWT_EXP_HOURS", None)
+        os.environ["JWT_EXP_DAYS"] = "2"
+        get_settings.cache_clear()
+        _token, exp_in, _jti = create_jwt(user_id=9, email="ttl@example.com", role="user")
+        # 2 天 = 172800s
+        self.assertGreaterEqual(exp_in, 172_790)
+        self.assertLessEqual(exp_in, 172_800)
+
+
 if __name__ == "__main__":
     unittest.main()
