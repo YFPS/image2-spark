@@ -199,40 +199,34 @@ class RecentWorksTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[0]["message_id"], good_id)
         self.assertEqual(items[0]["image_url"], "good.png")
 
-    async def test_ordered_desc_by_created_at(self):
+    async def test_ordered_desc(self):
+        """5 条按自然顺序生成 → 返回时是 id 倒序（最新优先）"""
         uid, token = await self._register_and_login()
         cid = await self._create_conv(uid)
-        base = datetime.utcnow()
         ids = []
         for i in range(5):
-            mid = await self._add_msg(
-                cid,
-                image_urls=[f"img-{i}.png"],
-                created_at=base - timedelta(hours=i),
-            )
+            mid = await self._add_msg(cid, image_urls=[f"img-{i}.png"])
             ids.append(mid)
-        # ids[0] 最新（i=0），ids[4] 最旧（i=4）
+        # ids[0] 是最旧（i=0 最先插入，id 最小），ids[4] 是最新（id 最大）
+        # 期望返回：id 倒序 = list(reversed(ids))
         r = await self.client.get("/api/me/recent-works", headers=self._auth(token))
         items = r.json()["items"]
-        self.assertEqual([it["message_id"] for it in items], ids)
+        self.assertEqual([it["message_id"] for it in items], list(reversed(ids)))
 
     async def test_limit_12(self):
+        """写 15 条 → 仅返回最新 12 条（id 倒序）"""
         uid, token = await self._register_and_login()
         cid = await self._create_conv(uid)
-        base = datetime.utcnow()
         ids = []
         for i in range(15):
-            mid = await self._add_msg(
-                cid,
-                image_urls=[f"img-{i}.png"],
-                created_at=base - timedelta(minutes=i),
-            )
+            mid = await self._add_msg(cid, image_urls=[f"img-{i}.png"])
             ids.append(mid)
+        # ids 按生成顺序升序（i=0 最早 id 最小，i=14 最新 id 最大）
+        # 期望返回：最新 12 条 = list(reversed(ids))[:12] = ids[-1], ids[-2], ..., ids[-12]
         r = await self.client.get("/api/me/recent-works", headers=self._auth(token))
         items = r.json()["items"]
         self.assertEqual(len(items), 12)
-        # 最新 12 条 = ids[0..11]
-        self.assertEqual([it["message_id"] for it in items], ids[:12])
+        self.assertEqual([it["message_id"] for it in items], list(reversed(ids))[:12])
 
     async def test_isolates_other_users(self):
         a_uid, a_token = await self._register_and_login()

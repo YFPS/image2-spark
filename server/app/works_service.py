@@ -23,7 +23,8 @@ def build_works_query(user_id: int, *, cursor: int | None = None, limit: int = 1
       - message.image_urls IS NOT NULL（DB 层）
 
     cursor 语义：返回 message.id < cursor 的下一批；None 表示从最新开始。
-    排序：created_at DESC（recent_works 固定用此语义；works 分页路由使用 cursor 时在 Task 3 再细化）。
+    排序：id DESC（与 created_at DESC 等价，因为 id 单调递增 + 应用层串行写入；
+    这是 spec § 2.1 的明确约定）。
     """
     where = [
         Conversation.user_id == user_id,
@@ -39,7 +40,7 @@ def build_works_query(user_id: int, *, cursor: int | None = None, limit: int = 1
         select(Message)
         .join(Conversation, Conversation.id == Message.conversation_id)
         .where(and_(*where))
-        .order_by(Message.created_at.desc())
+        .order_by(Message.id.desc())
         .limit(limit)
     )
 
