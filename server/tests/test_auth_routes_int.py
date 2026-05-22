@@ -269,6 +269,82 @@ class AuthRoutesIntegrationTests(unittest.IsolatedAsyncioTestCase):
         # 一个 201，一个 409；都不应是 500
         self.assertEqual(sorted(codes), [201, 409])
 
+    # ============ 邮箱验证 ============
+
+    async def test_verify_email_grants_signup_bonus_once(self):
+        """验证 token 消费一次 → 设 email_verified_at + 发 signup bonus；二次消费幂等不再发积分。"""
+        from app.email_verification_service import create_verification_token
+
+        email = self._track(_rand_email())
+        reg = await self.client.post(
+            "/api/auth/register", json={"email": email, "password": "abc12345"}
+        )
+        self.assertEqual(reg.status_code, 201, reg.text)
+        uid = reg.json()["user"]["id"]
+
+        factory = get_session_factory()
+        # 注册时已落一条 token（hash 形式）；测试拿不到明文，所以新生成一份用来测验证流程
+        async with factory() as s:
+            user = (
+                await s.execute(User.__table__.select().where(User.id == uid))
+            ).fetchone()
+            self.assertIsNotNone(user)
+            token = await create_verification_token(s, user)
+            await s.commit()
+
+        ok = await self.client.post("/api/auth/verify-email", json={"token": token})
+        self.assertEqual(ok.status_code, 200, ok.text)
+        self.assertEqual(ok.json()["user"]["credits"], 5)
+        self.assertFalse(ok.json()["user"]["verification_required"])
+        self.assertIsNotNone(ok.json()["user"]["email_verified_at"])
+
+        # 同一 token 二次提交：因为它已被消费置 used，期望 verification_token_invalid，
+        # 但因 user 已验证 → 走幂等返回 200 ok 不再加积分
+        again = await self.client.post("/api/auth/verify-email", json={"token": token})
+        self.assertEqual(again.status_code, 200, again.text)
+        self.assertEqual(again.json()["user"]["credits"], 5)
+
+        # signup_bonus 流水只应有一条
+        async with factory() as s:
+            rows = (await s.execute(
+                CreditTransaction.__table__.select().where(CreditTransaction.user_id == uid)
+            )).fetchall()
+            signup_rows = [r for r in rows if r.reason == "signup_bonus"]
+            self.assertEqual(len(signup_rows), 1)
+            self.assertEqual(signup_rows[0].delta, 5)
+            self.assertEqual(signup_rows[0].balance_after, 5)
+
+    async def test_resend_verification_does_not_reveal_email_state(self):
+        """resend 对不存在/已验证/未验证邮箱都返回相同 {ok: true}（防枚举）。"""
+        # 不存在的邮箱
+        missing = await self.client.post(
+            "/api/auth/resend-verification",
+            json={"email": _rand_email()},
+        )
+        self.assertEqual(missing.status_code, 200)
+        self.assertEqual(missing.json(), {"ok": True})
+
+        # 注册一个新用户，未验证态
+        email = self._track(_rand_email())
+        reg = await self.client.post(
+            "/api/auth/register", json={"email": email, "password": "abc12345"}
+        )
+        self.assertEqual(reg.status_code, 201)
+        unverified = await self.client.post(
+            "/api/auth/resend-verification",
+            json={"email": email},
+        )
+        self.assertEqual(unverified.status_code, 200)
+        self.assertEqual(unverified.json(), {"ok": True})
+
+    async def test_verify_invalid_token_400(self):
+        r = await self.client.post(
+            "/api/auth/verify-email",
+            json={"token": "this-token-does-not-exist-at-all"},
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()["error"]["code"], "verification_token_invalid")
+
 
 if __name__ == "__main__":
     unittest.main()
