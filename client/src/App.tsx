@@ -990,22 +990,35 @@ function SimpleGenerateView({
             }`}
           >
             <div className="flex min-w-0 items-center gap-2">
-              {/* 展开态：完整横向 logo（含 Mona 字样）；收起态：纯图标 */}
-              {sidebarExpanded ? (
-                <img
-                  src="/logo2.png"
-                  alt="Mona"
-                  className="h-[88px] w-[132px] max-w-none shrink-0 select-none"
-                  draggable={false}
-                />
-              ) : (
+              {/* 双 logo 叠加：容器尺寸 + 两图 opacity 同时 200ms 过渡，与 aside 宽度过渡同步 */}
+              <div
+                className="relative shrink-0 transition-[width,height] duration-200"
+                style={{
+                  width: sidebarExpanded ? 132 : 58,
+                  height: sidebarExpanded ? 88 : 58,
+                }}
+              >
+                {/* 收起态：纯图标 logo，在容器中居中淡入淡出 */}
                 <img
                   src="/logo.png"
                   alt="Mona"
-                  className="h-[58px] w-[58px] max-w-none shrink-0 select-none"
+                  aria-hidden={sidebarExpanded}
                   draggable={false}
+                  className={`pointer-events-none absolute left-1/2 top-1/2 h-[58px] w-[58px] max-w-none -translate-x-1/2 -translate-y-1/2 select-none transition-opacity duration-200 ${
+                    sidebarExpanded ? "opacity-0" : "opacity-100"
+                  }`}
                 />
-              )}
+                {/* 展开态：横向 logo（含 Mona 字样），填满容器淡入淡出 */}
+                <img
+                  src="/logo2.png"
+                  alt="Mona"
+                  aria-hidden={!sidebarExpanded}
+                  draggable={false}
+                  className={`pointer-events-none absolute left-0 top-0 h-[88px] w-[132px] max-w-none select-none transition-opacity duration-200 ${
+                    sidebarExpanded ? "opacity-100" : "opacity-0"
+                  }`}
+                />
+              </div>
             </div>
             {sidebarExpanded && (
               <button
@@ -1117,7 +1130,7 @@ function SimpleGenerateView({
                     setRefDragOver(false);
                     handleRefFiles(e.dataTransfer.files);
                   }}
-                  className={`relative h-[176px] overflow-hidden rounded-[22px] border px-5 pb-4 pt-4 transition-all ${
+                  className={`relative min-h-[176px] overflow-hidden rounded-[22px] border px-5 pb-4 pt-4 transition-all ${
                     refDragOver
                       ? "border-accent-foxo/70 bg-accent-foxo/[0.07] ring-2 ring-accent-foxo/25"
                       : "border-white/[0.14] bg-[#0b0b0f]/30 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.025),0_0_30px_rgba(158,38,116,0.14)] hover:border-white/[0.24]"
