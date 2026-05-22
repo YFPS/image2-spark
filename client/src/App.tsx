@@ -1183,7 +1183,7 @@ function SimpleGenerateView({
                     )}
                   </div>
 
-                  <div className="relative z-10 mt-5 grid grid-cols-5 gap-x-2 gap-y-5 pt-3 transition-transform duration-200 ease-out group-hover:-translate-y-1.5">
+                  <div className="relative z-10 mt-5 grid grid-cols-5 gap-x-2 gap-y-5 transition-transform duration-200 ease-out group-hover:-translate-y-1.5">
                     {foldedRefImages.length === 0 && (
                       <button
                         title="添加参考图（支持多选）"
@@ -1203,34 +1203,30 @@ function SimpleGenerateView({
                     {foldedRefImages.map((item, idx) => {
                       const isMain = idx === 0;
                       const isMulti = refImages.length > 1;
+                      const showMainStyle = isMain && isMulti;     // 实际主图：始终显示主图样式
+                      const canPromote = !isMain && isMulti;        // 非主图（多图）：hover 时预览主图样式，点击即设为主图
                       return (
                       <div key={item.id} className="group/thumb relative">
-                        {/* 设为主图按钮：放在外层（无 overflow-hidden）才能溢出到缩略图顶部之上 */}
-                        {!isMain && isMulti && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
+                        <div
+                          title={canPromote ? "点击设为主图（涂抹将作用于主图）" : "点击放大预览"}
+                          onClick={(e) => {
+                            if (canPromote) {
                               e.stopPropagation();
                               setRefImages((prev) => {
                                 const arr = prev.filter((it) => it.id !== item.id);
                                 return [item, ...arr];
                               });
                               setRefMaskBlob(null); // 切主图清旧 mask
-                            }}
-                            title="设为主图（涂抹将作用于主图）"
-                            aria-label="设为主图"
-                            className="absolute left-1/2 top-0 z-20 -translate-x-1/2 -translate-y-[110%] whitespace-nowrap rounded-full bg-accent-foxo px-2 py-0.5 text-[9px] font-semibold leading-none text-[#0D0D0D] shadow-[0_2px_8px_rgba(247,200,11,0.4)] ring-1 ring-accent-foxo/40 transition-transform hover:scale-105 hover:bg-accent-foxo/90"
-                          >
-                            设为主图
-                          </button>
-                        )}
-                        <div
-                          title="点击放大预览"
-                          onClick={() => setPreviewSrc(item.dataURL)}
-                          className={`relative aspect-[3/4] w-full cursor-zoom-in overflow-hidden rounded-[10px] border bg-[#141418] shadow-[0_14px_28px_-6px_rgba(0,0,0,0.55),0_4px_10px_rgba(0,0,0,0.38),inset_0_0_0_1px_rgba(255,255,255,0.08)] transition-[border-color,box-shadow,transform] duration-200 ease-out -skew-x-12 hover:-translate-y-0.5 hover:shadow-[0_16px_30px_-4px_rgba(247,200,11,0.45),0_4px_10px_rgba(0,0,0,0.4),inset_0_0_0_1px_rgba(247,200,11,0.42)] ${
-                            isMain && isMulti
-                              ? "border-accent-foxo/70 ring-1 ring-accent-foxo/50"
-                              : "border-white/[0.14] hover:border-accent-foxo/60"
+                            } else {
+                              setPreviewSrc(item.dataURL);
+                            }
+                          }}
+                          className={`relative aspect-[3/4] w-full overflow-hidden rounded-[10px] border bg-[#141418] shadow-[0_14px_28px_-6px_rgba(0,0,0,0.55),0_4px_10px_rgba(0,0,0,0.38),inset_0_0_0_1px_rgba(255,255,255,0.08)] transition-[border-color,box-shadow,transform] duration-200 ease-out -skew-x-12 hover:-translate-y-0.5 ${
+                            showMainStyle
+                              ? "cursor-zoom-in border-accent-foxo ring-2 ring-accent-foxo/70 ring-inset shadow-[0_18px_36px_-6px_rgba(247,200,11,0.55),0_4px_10px_rgba(0,0,0,0.45),inset_0_0_0_1px_rgba(247,200,11,0.6)]"
+                              : canPromote
+                                ? "cursor-pointer border-white/[0.14] hover:border-accent-foxo hover:ring-2 hover:ring-accent-foxo/70 hover:ring-inset hover:shadow-[0_18px_36px_-6px_rgba(247,200,11,0.55),0_4px_10px_rgba(0,0,0,0.45),inset_0_0_0_1px_rgba(247,200,11,0.6)]"
+                                : "cursor-zoom-in border-white/[0.14] hover:border-accent-foxo/60 hover:shadow-[0_16px_30px_-4px_rgba(247,200,11,0.45),0_4px_10px_rgba(0,0,0,0.4),inset_0_0_0_1px_rgba(247,200,11,0.42)]"
                           }`}
                         >
                           <img
@@ -1246,13 +1242,21 @@ function SimpleGenerateView({
                             <div className="absolute inset-x-1.5 top-0 h-px bg-gradient-to-r from-transparent via-white/55 to-transparent" />
                             <div className="absolute inset-y-1.5 left-0 w-px bg-gradient-to-b from-white/45 via-white/10 to-transparent" />
                           </div>
-                          {/* 主图角标（仅多图） */}
-                          {isMain && isMulti && (
-                            <span className="pointer-events-none absolute left-1 top-1 z-10 rounded-full bg-accent-foxo/85 px-1.5 py-0.5 text-[9px] font-semibold leading-none text-[#0D0D0D] skew-x-12">
-                              主图
-                            </span>
+                          {/* 顶部"主图"黄色条带：实际主图常显；非主图（多图）hover 时显现 */}
+                          {(showMainStyle || canPromote) && (
+                            <div
+                              className={`pointer-events-none absolute -inset-x-px -top-px z-[5] flex h-[26px] items-center rounded-t-[12px] bg-accent-foxo pl-2.5 ${
+                                canPromote
+                                  ? "opacity-0 transition-opacity duration-150 group-hover/thumb:opacity-100"
+                                  : ""
+                              }`}
+                            >
+                              <span className="text-[11px] font-bold leading-none text-[#0D0D0D] skew-x-12">
+                                主图
+                              </span>
+                            </div>
                           )}
-                          {/* × 移除按钮 */}
+                          {/* × 移除按钮（z-index 高于顶部条带） */}
                           <button
                             type="button"
                             onClick={(e) => {
