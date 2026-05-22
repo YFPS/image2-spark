@@ -67,7 +67,7 @@ async def list_logs(
             if mid is not None and mid in msgs_by_id:
                 m = msgs_by_id[mid]
                 urls = m.image_urls or []
-                prompt = (m.text or "").strip()[:PROMPT_PREVIEW_LEN] if m.text else None
+                prompt = (m.text or "").strip()[:PROMPT_PREVIEW_LEN] or None
                 ref = LogRef(
                     kind="message",
                     message_id=m.id,
