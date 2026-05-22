@@ -590,7 +590,8 @@ function SimpleGenerateView({
       void recentWorks.refresh();
     }
     recentWorksDoneRef.current = { convId, count: doneCount };
-  }, [conversations.current, recentWorks]);
+    // recentWorks 整体每次 setState 都是新引用；只依赖稳定的 refresh（useCallback 内）即可
+  }, [conversations.current, recentWorks.refresh]);
   const [pendingBubble, setPendingBubble] = useState<ChatMsg | null>(null);
   const DEFAULT_GREET: ChatMsg = {
     id: "greet",
