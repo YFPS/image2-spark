@@ -42,6 +42,8 @@ import { HistoryDropdown } from "./conversation/HistoryDropdown";
 import { TimelineQuickJump } from "./conversation/TimelineQuickJump";
 import { conversationHasPendingGeneration } from "./conversation/pendingGeneration";
 import { extractConversationResults } from "./conversation/conversationResults";
+import { RefImagesStrip } from "./components/RefImagesStrip";
+import { REF_MAX, extractImageFilesFromEvent, fileToDataURL } from "./utils/imageInput";
 
 // 角色 → 侧边栏副标显示
 const ROLE_LABEL: Record<"admin" | "user" | "paid", string> = {
@@ -539,6 +541,27 @@ function SimpleGenerateView({
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   // 聊天输入框 ref，供后续 onPaste / handleSetAsEditTarget 等使用
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const [chatDragOver, setChatDragOver] = useState(false);
+
+  // 把粘贴/拖拽进来的 image File 追加到 refImages（不替换；与"作为修改起点"按钮的替换语义区分）
+  const appendRefImagesFromFiles = async (files: File[]) => {
+    const remaining = REF_MAX - refImages.length;
+    if (remaining <= 0) {
+      setErrorMsg(`参考图最多 ${REF_MAX} 张`);
+      return;
+    }
+    const accepted = files.slice(0, remaining);
+    try {
+      const dataURLs = await Promise.all(accepted.map(fileToDataURL));
+      setRefImages((prev) => [
+        ...prev,
+        ...dataURLs.map((d) => ({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`, dataURL: d })),
+      ]);
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : "读取图片失败");
+    }
+  };
+
   const [historyOpen, setHistoryOpen] = useState(false);
 
   const [activeNav, setActiveNav] = useState("studio");
@@ -655,9 +678,8 @@ function SimpleGenerateView({
   const [refMaskBlob, setRefMaskBlob] = useState<Blob | null>(null);
   const [maskModalOpen, setMaskModalOpen] = useState(false);
 
-  // 兼容旧逻辑的别名 / 上限
+  // 兼容旧逻辑的别名 / 上限（REF_MAX 已从 utils/imageInput 导入）
   const refImage = refImages[0]?.dataURL ?? null;
-  const REF_MAX = 10;
   const REF_FOLDED_LIMIT = 5;
   const foldedRefImages = refImages.slice(0, REF_FOLDED_LIMIT);
   const foldedHiddenCount = Math.max(0, refImages.length - REF_FOLDED_LIMIT);
@@ -1562,8 +1584,50 @@ function SimpleGenerateView({
               </div>
             )}
 
+            {refImages.length > 0 && (
+              <RefImagesStrip
+                items={refImages}
+                onRemove={(id) =>
+                  setRefImages((prev) => prev.filter((it) => it.id !== id))
+                }
+                onAddFiles={(files) => appendRefImagesFromFiles(files)}
+              />
+            )}
             {/* 输入条 */}
-            <div className="flex shrink-0 items-start gap-2 rounded-[18px] border border-white/[0.04] bg-[#141418] px-3 py-2">
+            <div
+              className={`relative flex shrink-0 items-start gap-2 rounded-[18px] border bg-[#141418] px-3 py-2 transition-colors ${
+                chatDragOver
+                  ? "border-accent-foxo/50 ring-2 ring-accent-foxo/30"
+                  : "border-white/[0.04]"
+              }`}
+              onDragEnter={(e) => {
+                if (Array.from(e.dataTransfer.types || []).includes("Files")) {
+                  e.preventDefault();
+                  setChatDragOver(true);
+                }
+              }}
+              onDragOver={(e) => {
+                if (Array.from(e.dataTransfer.types || []).includes("Files")) {
+                  e.preventDefault();
+                }
+              }}
+              onDragLeave={(e) => {
+                // 只在离开真正的容器边界时取消（避免子元素冒泡误触发）
+                if (e.currentTarget === e.target) setChatDragOver(false);
+              }}
+              onDrop={async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setChatDragOver(false);
+                const files = extractImageFilesFromEvent(e);
+                if (files.length > 0) await appendRefImagesFromFiles(files);
+              }}
+            >
+              {chatDragOver && (
+                <div className="pointer-events-none absolute inset-0 grid place-items-center rounded-[18px] bg-[#141418]/85 text-[12px] font-medium text-accent-foxo">
+                  松开以添加参考图
+                </div>
+              )}
               <textarea
                 ref={chatInputRef}
                 value={chatInput}
@@ -1574,6 +1638,14 @@ function SimpleGenerateView({
                     e.preventDefault();
                     handleGenerate();
                   }
+                }}
+                onPaste={async (e) => {
+                  const files = extractImageFilesFromEvent(e);
+                  if (files.length > 0) {
+                    e.preventDefault();
+                    await appendRefImagesFromFiles(files);
+                  }
+                  // 没有图片就 fallback 浏览器默认（粘贴文本）
                 }}
                 rows={1}
                 placeholder={
