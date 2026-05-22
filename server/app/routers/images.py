@@ -467,6 +467,7 @@ async def _run_edit_task(
     files: list[tuple[str, tuple[str, bytes, str]]],
     user_id: int,
     cost: int,
+    dropped_refs: int = 0,
 ) -> None:
     """后台任务：调上游 edit，回写 message。失败时退款。可重试错误走 _call_upstream_with_retry 退避重试 3 次。"""
     factory = get_session_factory()
@@ -521,6 +522,8 @@ async def _run_edit_task(
     text = f"已修改 {returned} 张 · {usage['total_tokens']} tokens"
     if missing > 0:
         text += f"（请求 {requested} 张，已退 {missing} 积分）"
+    if dropped_refs > 0:
+        text += f"（已忽略 {dropped_refs} 张副参考图，当前上游仅支持单图）"
     params = {
         "mode": "edit",
         "model": upstream_json.get("model", fields.get("model")),
@@ -619,7 +622,11 @@ async def edit(
         "n": str(n),
         "background": background,
     }
-    files: list[tuple[str, tuple[str, bytes, str]]] = [("image[]", p) for p in image_payloads]
+    # 上游字段名固定 image（单数）：tabcode 不识别 image[]；OpenAI/feiyuai 都兼容单图 image。
+    # 多图时只取主图（image_payloads[0]），副图丢弃 + 在文案里告知用户已忽略
+    dropped_refs = max(0, len(image_payloads) - 1)
+    main_payload = image_payloads[0]
+    files: list[tuple[str, tuple[str, bytes, str]]] = [("image", main_payload)]
     files.append(("mask", ("mask.png", mask_bytes, "image/png")))
 
     init_params = {
@@ -634,7 +641,10 @@ async def edit(
     await db.refresh(msg)
 
     _spawn_background_task(
-        _run_edit_task(msg.id, conv.id, fields, files, user_id=user.id, cost=cost)
+        _run_edit_task(
+            msg.id, conv.id, fields, files, user_id=user.id, cost=cost,
+            dropped_refs=dropped_refs,
+        )
     )
     _ = model  # 显式吸收 unused 参数避免 lint
 
