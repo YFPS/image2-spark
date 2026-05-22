@@ -17,7 +17,7 @@ from .config import get_settings
 from .db import get_engine
 from .rate_limit import get_limiter
 from .redis_client import get_redis
-from .routers import auth, conversations, images
+from .routers import auth, conversations, images, recent_works
 
 logger = logging.getLogger("image2")
 
@@ -132,6 +132,7 @@ async def _validation_handler(request: Request, exc: RequestValidationError):
 app.include_router(images.router)
 app.include_router(auth.router)
 app.include_router(conversations.router)
+app.include_router(recent_works.router)
 
 
 @app.get("/api/health")
