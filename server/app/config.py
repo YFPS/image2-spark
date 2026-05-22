@@ -20,6 +20,11 @@ class Settings:
             "OPENAI_BASE_URL", "https://api.openai.com/v1"
         ).rstrip("/")
         self.openai_timeout: float = float(os.getenv("OPENAI_TIMEOUT", "120"))
+        # 备用上游：两项都非空才启用回退
+        self.openai_api_key_backup: str = os.getenv("OPENAI_API_KEY_BACKUP", "").strip()
+        self.openai_base_url_backup: str = os.getenv(
+            "OPENAI_BASE_URL_BACKUP", ""
+        ).strip().rstrip("/")
         # 抠图模型（rembg，仅 SEGMENT_BACKEND=rembg 时生效）
         self.rembg_model: str = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
         # 抠图后端：grabcut（默认，复杂海报场景表现好）/ rembg（v1，简单贴纸场景）

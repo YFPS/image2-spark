@@ -543,36 +543,33 @@ async def proxy_image(
     """反代上游 CDN 图片，规避前端 canvas 跨域 taint。
 
     无鉴权（要支持 <img src> 直接用），但限制 host：
-    - 仅 https
+    - 协议仅 http / https
     - host 必须在 PROXY_IMAGE_HOST_ALLOWLIST 内（生产必须配；为空时只允许 OPENAI_BASE_URL 所在 host）
     - 限流由全局 IP rate_limit_global 覆盖（120/分钟）
     """
     settings = get_settings()
-    if not url.startswith("https://"):
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
         return JSONResponse(
             status_code=400,
-            content={"error": {"code": "validation_error", "message": "仅支持 https URL"}},
+            content={"error": {"code": "validation_error", "message": "仅支持 http/https URL"}},
         )
 
     # host 白名单检查
-    try:
-        host = (urlparse(url).hostname or "").lower()
-    except ValueError:
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"code": "validation_error", "message": "URL 解析失败"}},
-        )
+    host = (parsed.hostname or "").lower()
     if not host:
         return JSONResponse(
             status_code=400,
             content={"error": {"code": "validation_error", "message": "URL 缺少 host"}},
         )
 
-    # 允许的 host：env 配置 + OPENAI_BASE_URL 的 host 兜底
+    # 允许的 host：env 配置 + OPENAI_BASE_URL / OPENAI_BASE_URL_BACKUP 的 host 兜底
     allow = set(settings.proxy_image_host_allowlist)
-    upstream_host = (urlparse(settings.openai_base_url).hostname or "").lower()
-    if upstream_host:
-        allow.add(upstream_host)
+    for base in (settings.openai_base_url, settings.openai_base_url_backup):
+        if base:
+            h = (urlparse(base).hostname or "").lower()
+            if h:
+                allow.add(h)
     if allow and host not in allow:
         return JSONResponse(
             status_code=403,
