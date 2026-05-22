@@ -1247,7 +1247,7 @@ function SimpleGenerateView({
                         >
                           ×
                         </button>
-                        {/* 设为主图按钮（多图且非主图，hover 显示） */}
+                        {/* 设为主图按钮（多图且非主图）：顶部上方黄色胶囊，默认可见，仿主图角标风格 */}
                         {!isMain && isMulti && (
                           <button
                             type="button"
@@ -1261,7 +1261,7 @@ function SimpleGenerateView({
                             }}
                             title="设为主图（涂抹将作用于主图）"
                             aria-label="设为主图"
-                            className="absolute bottom-0.5 left-1/2 z-10 -translate-x-1/2 rounded-full bg-black/85 px-2 py-0.5 text-[9px] font-medium leading-none text-white opacity-0 ring-1 ring-white/20 skew-x-12 transition-opacity group-hover/thumb:opacity-100 hover:bg-black"
+                            className="absolute -top-2 left-1/2 z-20 -translate-x-1/2 skew-x-12 rounded-full bg-accent-foxo px-2 py-0.5 text-[9px] font-semibold leading-none text-[#0D0D0D] shadow-[0_2px_8px_rgba(247,200,11,0.4)] ring-1 ring-accent-foxo/40 transition-transform hover:scale-105 hover:bg-accent-foxo/90"
                           >
                             设为主图
                           </button>
