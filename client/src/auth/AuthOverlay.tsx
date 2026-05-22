@@ -26,7 +26,12 @@ const ERROR_TEXT: Record<string, string> = {
   email_taken: "该邮箱已注册",
   invalid_credentials: "邮箱或密码错误",
   invalid_token: "登录已过期，请重新登录",
+  // account_disabled 在登录路径已不再返回（合流到 invalid_credentials）；
+  // 但 /me 等受保护接口在中途封号场景仍会返回，保留文案
   account_disabled: "账号已停用，请联系管理员",
+  email_not_verified: "请先验证邮箱后再继续",
+  verification_token_invalid: "验证链接无效或已使用",
+  verification_token_expired: "验证链接已过期，请重新发送",
   forbidden: "当前角色无权访问",
   too_many_attempts: "登录失败次数过多，请稍后再试",
   internal_error: "服务异常，请稍后重试",

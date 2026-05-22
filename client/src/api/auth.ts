@@ -9,6 +9,10 @@ export type UserPublic = {
   role: UserRole;
   avatar_url: string | null;
   credits: number;
+  // 邮箱验证时间；null 表示未验证
+  email_verified_at: string | null;
+  // 后端派生：email_verified_at === null
+  verification_required: boolean;
   last_login_at: string | null;
   created_at: string;
 };
@@ -18,6 +22,8 @@ export type TokenResponse = {
   token_type: "Bearer";
   expires_in: number;
   user: UserPublic;
+  // 注册接口返回；邮件 provider 临时故障时为 false，前端提示重发
+  verification_email_sent: boolean;
 };
 
 export type ApiAuthError = {
@@ -120,4 +126,28 @@ export async function fetchMe(): Promise<UserPublic> {
   const res = await authFetch("/api/auth/me");
   if (!res.ok) throw new AuthApiError(res.status, await parseErrorBody(res));
   return (await res.json()) as UserPublic;
+}
+
+// ===== 邮箱验证 =====
+
+/** 用邮件链接里的 token 完成验证；成功返回最新 user（含 credits +5）。 */
+export async function verifyEmail(token: string): Promise<UserPublic> {
+  const res = await fetch("/api/auth/verify-email", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  if (!res.ok) throw new AuthApiError(res.status, await parseErrorBody(res));
+  const body = (await res.json()) as { ok: boolean; user: UserPublic };
+  return body.user;
+}
+
+/** 重发验证邮件。后端固定返回 {ok:true}，不暴露邮箱状态。 */
+export async function resendVerification(email: string): Promise<void> {
+  const res = await fetch("/api/auth/resend-verification", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) throw new AuthApiError(res.status, await parseErrorBody(res));
 }

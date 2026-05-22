@@ -15,7 +15,9 @@ import {
   login as apiLogin,
   logout as apiLogout,
   register as apiRegister,
+  resendVerification as apiResendVerification,
   setToken,
+  verifyEmail as apiVerifyEmail,
   type UserPublic,
 } from "../api/auth";
 
@@ -24,10 +26,14 @@ type Status = "loading" | "unauthenticated" | "authenticated";
 type AuthState = {
   user: UserPublic | null;
   status: Status;
+  // 注册响应里的 verification_email_sent；登录后清回 null
+  verificationEmailSent: boolean | null;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, nickname?: string) => Promise<void>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
+  verifyEmailToken: (token: string) => Promise<void>;
+  resendVerificationEmail: () => Promise<void>;
 };
 
 const AuthCtx = createContext<AuthState | null>(null);
@@ -41,6 +47,7 @@ export function useAuth(): AuthState {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<UserPublic | null>(null);
   const [status, setStatus] = useState<Status>("loading");
+  const [verificationEmailSent, setVerificationEmailSent] = useState<boolean | null>(null);
 
   const refresh = useCallback(async () => {
     const t = getToken();
@@ -70,6 +77,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const r = await apiLogin({ email, password });
     setToken(r.access_token);
     setUser(r.user);
+    setVerificationEmailSent(null);
     setStatus("authenticated");
   }, []);
 
@@ -78,6 +86,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const r = await apiRegister({ email, password, nickname });
       setToken(r.access_token);
       setUser(r.user);
+      setVerificationEmailSent(r.verification_email_sent);
       setStatus("authenticated");
     },
     [],
@@ -87,12 +96,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await apiLogout();
     setToken(null);
     setUser(null);
+    setVerificationEmailSent(null);
     setStatus("unauthenticated");
   }, []);
 
+  const verifyEmailToken = useCallback(async (token: string) => {
+    const nextUser = await apiVerifyEmail(token);
+    setUser(nextUser);
+    setVerificationEmailSent(null);
+    setStatus("authenticated");
+  }, []);
+
+  const resendVerificationEmail = useCallback(async () => {
+    if (!user) return;
+    await apiResendVerification(user.email);
+    setVerificationEmailSent(true);
+  }, [user]);
+
   const value = useMemo<AuthState>(
-    () => ({ user, status, login, register, logout, refresh }),
-    [user, status, login, register, logout, refresh],
+    () => ({
+      user,
+      status,
+      verificationEmailSent,
+      login,
+      register,
+      logout,
+      refresh,
+      verifyEmailToken,
+      resendVerificationEmail,
+    }),
+    [
+      user,
+      status,
+      verificationEmailSent,
+      login,
+      register,
+      logout,
+      refresh,
+      verifyEmailToken,
+      resendVerificationEmail,
+    ],
   );
 
   return <AuthCtx.Provider value={value}>{children}</AuthCtx.Provider>;
