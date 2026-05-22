@@ -20,6 +20,8 @@ import type {
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { LiquidGlass, type GlassShape } from "./LiquidGlass";
 import { RecentWorksCard } from "./components/RecentWorksCard";
+import { GalleryPage } from "./pages/GalleryPage";
+import { LogsPage } from "./pages/LogsPage";
 import { useRecentWorks } from "./hooks/useRecentWorks";
 import { GlassControls, loadStoredParams, type GlassParams } from "./GlassControls";
 import {
@@ -867,9 +869,12 @@ function SimpleGenerateView({
   };
 
   useLayoutEffect(() => {
-    // 当 activeNav === "models" 时，由 ModelPlaza 主导上报 5 个广场 shape，
-    // 这里跳过，避免两个来源相互覆盖。
-    if (activeNav === "models") return;
+    // 当 activeNav 不是 "studio" 时（models/gallery/logs），由对应页面主导玻璃 shape，
+    // MainCanvas 的 7 张玻璃壳测量跳过；同时清空 shapes，避免上次工作室的影子残留。
+    if (activeNav !== "studio") {
+      onShapesChange([]);
+      return;
+    }
     const refs: RefObject<HTMLElement | null>[] = [
       sidebarRef,
       referenceCardRef,
@@ -990,6 +995,10 @@ function SimpleGenerateView({
 
         {activeNav === "models" ? (
           <ModelPlaza onShapesChange={onShapesChange} />
+        ) : activeNav === "gallery" ? (
+          <GalleryPage onPreview={(src) => setPreviewSrc(src)} />
+        ) : activeNav === "logs" ? (
+          <LogsPage onPreview={(src) => setPreviewSrc(src)} />
         ) : (
         <div className="flex min-w-0 flex-1 flex-col gap-3">
           {/* 顶部标题（贴外、不进卡） */}
@@ -1696,11 +1705,10 @@ function MetricChip({ label, value }: { label: string; value: string }) {
 
 /* ---------- 侧栏 / 聊天 ---------- */
 const SIDEBAR_ITEMS: ReadonlyArray<{ key: string; label: string; icon: ReactNode }> = [
-  { key: "studio", label: "工作室", icon: <StudioIcon /> },
-  { key: "gallery", label: "画廊", icon: <GalleryIcon /> },
-  { key: "inspiration", label: "灵感", icon: <InspirationIcon /> },
-  { key: "models", label: "模型", icon: <ModelsIcon /> },
-  { key: "history", label: "历史", icon: <HistoryIcon /> },
+  { key: "studio",  label: "工作室", icon: <StudioIcon /> },
+  { key: "gallery", label: "画廊",   icon: <GalleryIcon /> },
+  { key: "models",  label: "模型",   icon: <ModelsIcon /> },
+  { key: "logs",    label: "日志",   icon: <HistoryIcon /> },
 ];
 
 function SidebarItem({
@@ -1873,13 +1881,6 @@ function GalleryIcon() {
       <rect x="3" y="3" width="14" height="14" rx="2" />
       <circle cx="7" cy="8" r="1.4" />
       <path d="M17 13l-4-4-7 7" />
-    </svg>
-  );
-}
-function InspirationIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M10 2.5l1.8 4.4 4.7.4-3.6 3.1 1.1 4.6L10 12.6 6 15l1.1-4.6L3.5 7.3l4.7-.4L10 2.5z" />
     </svg>
   );
 }
