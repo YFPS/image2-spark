@@ -709,9 +709,8 @@ function SimpleGenerateView({
 
   // 兼容旧逻辑的别名 / 上限（REF_MAX 已从 utils/imageInput 导入）
   const refImage = refImages[0]?.dataURL ?? null;
-  const REF_FOLDED_LIMIT = 5;
-  const foldedRefImages = refImages.slice(0, REF_FOLDED_LIMIT);
-  const foldedHiddenCount = Math.max(0, refImages.length - REF_FOLDED_LIMIT);
+  // 折叠机制已移除：默认全部显示（最多 REF_MAX 张），hover 上浮动画仍保留
+  const foldedRefImages = refImages;
   const handleRefFiles = useCallback((files: FileList | File[] | null | undefined) => {
     if (!files) return;
     const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
@@ -1272,11 +1271,7 @@ function SimpleGenerateView({
                     })}
                     {refImages.length < REF_MAX && foldedRefImages.length > 0 && (
                       <button
-                        title={
-                          foldedHiddenCount > 0
-                            ? `还有 ${foldedHiddenCount} 张，点击继续添加`
-                            : "添加参考图（支持多选）"
-                        }
+                        title="添加参考图（支持多选）"
                         onClick={() => refFileInputRef.current?.click()}
                         className="group/add grid aspect-[3/4] w-full place-items-center rounded-[10px] border border-dashed border-white/[0.18] bg-white/[0.015] text-[22px] font-light leading-none text-white/45 transition-[border-color,background-color,color,transform] duration-200 ease-out -skew-x-12 hover:-translate-y-1 hover:border-accent-foxo/60 hover:bg-accent-foxo/[0.04] hover:text-accent-foxo"
                       >
@@ -1287,8 +1282,8 @@ function SimpleGenerateView({
 
                   <div className="relative z-10 mt-3 text-[11px] font-medium text-white/[0.42]">
                     {refImages.length === 0
-                      ? "可选 · 拖拽或点击上传（支持多张）"
-                      : `默认折叠显示 ${REF_FOLDED_LIMIT} 张，悬停展开查看全部`}
+                      ? `可选 · 拖拽或点击上传（最多 ${REF_MAX} 张）`
+                      : `已上传 ${refImages.length} / ${REF_MAX} 张 · 悬停整体上浮查看`}
                   </div>
                 </div>
 
