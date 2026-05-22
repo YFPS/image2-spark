@@ -17,7 +17,7 @@ from .config import get_settings
 from .db import get_engine
 from .rate_limit import get_limiter
 from .redis_client import get_redis
-from .routers import auth, conversations, images, recent_works, works
+from .routers import auth, conversations, images, logs, recent_works, works
 
 logger = logging.getLogger("image2")
 
@@ -134,6 +134,7 @@ app.include_router(auth.router)
 app.include_router(conversations.router)
 app.include_router(recent_works.router)
 app.include_router(works.router)
+app.include_router(logs.router)
 
 
 @app.get("/api/health")
