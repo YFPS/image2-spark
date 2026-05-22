@@ -34,7 +34,7 @@ export function RefImagesStrip({ items, onRemove, onAddFiles }: Props) {
           <button
             type="button"
             onClick={() => onRemove(it.id)}
-            className="absolute right-0 top-0 grid h-4 w-4 -translate-y-1/2 translate-x-1/2 place-items-center rounded-full bg-black/82 text-[10px] text-white/82 opacity-0 transition-opacity group-hover:opacity-100"
+            className="absolute right-0.5 top-0.5 grid h-5 w-5 place-items-center rounded-full bg-black/85 text-[12px] leading-none text-white ring-1 ring-white/30 transition-colors hover:bg-black"
             title="移除"
             aria-label="移除参考图"
           >

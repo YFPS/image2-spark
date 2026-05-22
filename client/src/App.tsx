@@ -542,6 +542,24 @@ function SimpleGenerateView({
   // 聊天输入框 ref，供后续 onPaste / handleSetAsEditTarget 等使用
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
   const [chatDragOver, setChatDragOver] = useState(false);
+  // 输入框高度（JS 自定义垂直 resize；handle 在右上角，向上拖 = 放大）
+  const [chatTextareaHeight, setChatTextareaHeight] = useState(36);
+  const startChatResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = chatTextareaHeight;
+    const onMove = (ev: MouseEvent) => {
+      // 向上拖（clientY 减小）→ 高度增加
+      const next = Math.max(36, Math.min(360, startH + (startY - ev.clientY)));
+      setChatTextareaHeight(next);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
 
   // 把粘贴/拖拽进来的 image File 追加到 refImages（不替换；与"作为修改起点"按钮的替换语义区分）
   const appendRefImagesFromFiles = async (files: File[]) => {
@@ -977,14 +995,14 @@ function SimpleGenerateView({
                 <img
                   src="/logo2.png"
                   alt="Mona"
-                  className="h-10 w-auto shrink-0 select-none"
+                  className="h-16 w-auto shrink-0 select-none"
                   draggable={false}
                 />
               ) : (
                 <img
                   src="/logo.png"
                   alt="Mona"
-                  className="h-10 w-10 shrink-0 select-none"
+                  className="h-12 w-12 shrink-0 select-none"
                   draggable={false}
                 />
               )}
@@ -1662,38 +1680,58 @@ function SimpleGenerateView({
                   松开以添加参考图
                 </div>
               )}
-              <textarea
-                ref={chatInputRef}
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => {
-                  // Enter 提交、Shift+Enter 换行（与 ChatGPT 一致）
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleGenerate();
+              <div className="relative min-w-0 flex-1">
+                <textarea
+                  ref={chatInputRef}
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    // Enter 提交、Shift+Enter 换行（与 ChatGPT 一致）
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      handleGenerate();
+                    }
+                  }}
+                  onPaste={async (e) => {
+                    const files = extractImageFilesFromEvent(e);
+                    if (files.length > 0) {
+                      e.preventDefault();
+                      await appendRefImagesFromFiles(files);
+                    }
+                    // 没有图片就 fallback 浏览器默认（粘贴文本）
+                  }}
+                  rows={1}
+                  placeholder={
+                    isGenerating
+                      ? "生成中…"
+                      : mode === "edit"
+                        ? "描述你想如何修改图片，回车修改（Shift+Enter 换行）"
+                        : mode === "reasoning"
+                          ? "描述你想生成的画面（思考模式），回车出图"
+                          : "描述你想生成的画面，回车出图"
                   }
-                }}
-                onPaste={async (e) => {
-                  const files = extractImageFilesFromEvent(e);
-                  if (files.length > 0) {
-                    e.preventDefault();
-                    await appendRefImagesFromFiles(files);
-                  }
-                  // 没有图片就 fallback 浏览器默认（粘贴文本）
-                }}
-                rows={1}
-                placeholder={
-                  isGenerating
-                    ? "生成中…"
-                    : mode === "edit"
-                      ? "描述你想如何修改图片，回车修改（Shift+Enter 换行）"
-                      : mode === "reasoning"
-                        ? "描述你想生成的画面（思考模式），回车出图"
-                        : "描述你想生成的画面，回车出图"
-                }
-                disabled={isGenerating}
-                className="min-h-[36px] max-h-[240px] min-w-0 flex-1 resize-y overflow-y-auto bg-transparent py-1 text-[13px] leading-relaxed text-white/90 placeholder:text-white/32 focus:outline-none disabled:opacity-50"
-              />
+                  disabled={isGenerating}
+                  style={{ height: `${chatTextareaHeight}px` }}
+                  className="block w-full resize-none overflow-y-auto bg-transparent pr-7 py-1 text-[13px] leading-relaxed text-white/90 placeholder:text-white/32 focus:outline-none disabled:opacity-50"
+                />
+                <button
+                  type="button"
+                  onMouseDown={startChatResize}
+                  title="拖动调整输入框高度"
+                  aria-label="拖动调整输入框高度"
+                  className="absolute right-0 top-0 grid h-5 w-5 cursor-ns-resize place-items-center rounded-md text-white/40 hover:bg-white/[0.06] hover:text-white/72"
+                >
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M8 2 L8 14 M5 5 L8 2 L11 5 M5 11 L8 14 L11 11"
+                      stroke="currentColor"
+                      strokeWidth="1.4"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              </div>
               <button
                 onClick={handleGenerate}
                 disabled={!canGenerate}

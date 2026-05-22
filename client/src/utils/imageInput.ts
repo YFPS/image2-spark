@@ -8,7 +8,7 @@ import type * as React from "react";
  * - fileToDataURL：File → base64 dataURL（异步）
  */
 
-export const REF_MAX = 10;
+export const REF_MAX = 5;
 
 export function extractImageFilesFromEvent(
   e: React.ClipboardEvent | React.DragEvent,
