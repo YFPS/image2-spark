@@ -236,6 +236,67 @@ async def _finalize_message(
             logger.exception("finalize_message 写库失败 ai_msg_id=%s", ai_msg_id)
 
 
+# ===== 业务层重试（应对上游 5xx / 限流 / 偶发故障）=====
+# 最大尝试次数（含首次）：3 次都失败 → 服务器忙
+_TASK_MAX_ATTEMPTS = 3
+
+
+def _should_retry(exc: Exception) -> bool:
+    """业务层重试条件：5xx / 408 / 429 / 超时 / 网络层错。
+    4xx 中的参数错（400/422 等）、401（认证错）、402（余额）重试无意义，不重试。
+    """
+    if isinstance(exc, UpstreamTimeout):
+        return True
+    if isinstance(exc, UpstreamError):
+        return exc.status >= 500 or exc.status in {408, 429}
+    return False
+
+
+async def _update_pending_text(factory, ai_msg_id: int, text: str) -> None:
+    """独立 session 只更新 message.text，不动 status。给重试期间的"排队中"提示用"""
+    async with factory() as db:
+        try:
+            await db.execute(
+                update(Message).where(Message.id == ai_msg_id).values(text=text)
+            )
+            await db.commit()
+        except Exception:  # noqa: BLE001
+            await db.rollback()
+            logger.exception("_update_pending_text 写库失败 ai_msg_id=%s", ai_msg_id)
+
+
+async def _call_upstream_with_retry(
+    call,
+    factory,
+    ai_msg_id: int,
+    max_attempts: int = _TASK_MAX_ATTEMPTS,
+) -> dict[str, Any]:
+    """带重试的上游调用。可重试错误退避 1s/2s 重试 + 写"排队中"提示。
+    用尽次数后包装成 UpstreamError(503, "服务器忙，请稍后再试")。
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            await asyncio.sleep(attempt - 1)  # 1s, 2s 退避
+            await _update_pending_text(
+                factory, ai_msg_id, f"排队中（重试 {attempt}/{max_attempts}）"
+            )
+        try:
+            return await call()
+        except (UpstreamError, UpstreamTimeout) as e:
+            last_exc = e
+            if not _should_retry(e):
+                raise
+            logger.warning(
+                "upstream attempt %d/%d failed: %s; retrying...",
+                attempt, max_attempts, e,
+            )
+            if attempt >= max_attempts:
+                raise UpstreamError(503, "服务器忙，请稍后再试") from e
+    # 不可达
+    raise UpstreamError(503, "服务器忙，请稍后再试") from last_exc
+
+
 def _parse_upstream_images(
     upstream_json: dict[str, Any], output_format: str = "png"
 ) -> tuple[list[str], dict[str, Any], int]:
@@ -270,10 +331,12 @@ async def _run_generate_task(
     user_id: int,
     cost: int,
 ) -> None:
-    """后台任务：调上游 generate，回写 message。失败时退款。"""
+    """后台任务：调上游 generate，回写 message。失败时退款。可重试错误走 _call_upstream_with_retry 退避重试 3 次。"""
     factory = get_session_factory()
     try:
-        upstream_json = await call_images_generate(payload)
+        upstream_json = await _call_upstream_with_retry(
+            lambda: call_images_generate(payload), factory, ai_msg_id,
+        )
     except UpstreamTimeout as e:
         await _finalize_message(
             factory, ai_msg_id, conv_id, ok=False, text=f"失败：上游超时 ({e})"
@@ -405,10 +468,12 @@ async def _run_edit_task(
     user_id: int,
     cost: int,
 ) -> None:
-    """后台任务：调上游 edit，回写 message。失败时退款。"""
+    """后台任务：调上游 edit，回写 message。失败时退款。可重试错误走 _call_upstream_with_retry 退避重试 3 次。"""
     factory = get_session_factory()
     try:
-        upstream_json = await call_images_edit(fields, files)
+        upstream_json = await _call_upstream_with_retry(
+            lambda: call_images_edit(fields, files), factory, ai_msg_id,
+        )
     except UpstreamTimeout as e:
         await _finalize_message(
             factory, ai_msg_id, conv_id, ok=False, text=f"失败：上游超时 ({e})"
