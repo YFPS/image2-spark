@@ -240,3 +240,46 @@ class RecentWorkItem(BaseModel):
 
 class RecentWorksOut(BaseModel):
     items: list[RecentWorkItem]
+
+
+# ===== 画廊（GET /api/me/works）=====
+
+
+class WorksPage(BaseModel):
+    """画廊一页响应：items 复用 RecentWorkItem 的字段；next_cursor 为下一页起点"""
+
+    items: list[RecentWorkItem]
+    next_cursor: int | None = None
+
+
+# ===== 日志（GET /api/me/logs）=====
+
+LogType = Literal[
+    "signup_bonus", "recharge", "admin_grant",
+    "generate", "edit", "refund", "adjust",
+]
+
+
+class LogRef(BaseModel):
+    """日志条目的业务关联（generate / edit 才有）"""
+
+    kind: Literal["message"]
+    message_id: int
+    conversation_id: int
+    thumbnail_url: str | None
+    prompt_preview: str | None
+
+
+class LogItem(BaseModel):
+    id: int
+    type: LogType
+    delta: int
+    balance_after: int
+    note: str | None
+    created_at: datetime
+    ref: LogRef | None = None
+
+
+class LogsPage(BaseModel):
+    items: list[LogItem]
+    next_cursor: int | None = None
