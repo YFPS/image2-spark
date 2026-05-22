@@ -1,7 +1,7 @@
 import { forwardRef } from "react";
 
 import { useAuth } from "../auth/AuthContext";
-import type { RecentWorkItem } from "../api/gptImage";
+import { safeImageSrc, type RecentWorkItem } from "../api/gptImage";
 import { formatRelativeTime } from "../utils/relativeTime";
 
 type Props = {
@@ -42,11 +42,11 @@ export const RecentWorksCard = forwardRef<HTMLDivElement, Props>(
               <button
                 key={it.message_id}
                 type="button"
-                onClick={() => onPreview(it.image_url)}
+                onClick={() => onPreview(safeImageSrc(it.image_url))}
                 className="group relative h-[84px] w-[120px] shrink-0 overflow-hidden rounded-[14px] border border-white/[0.05] bg-[#111114] transition-shadow hover:ring-1 hover:ring-white/10"
               >
                 <img
-                  src={it.image_url}
+                  src={safeImageSrc(it.image_url)}
                   alt=""
                   loading="lazy"
                   className="h-full w-full object-cover"
