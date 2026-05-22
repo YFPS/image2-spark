@@ -295,10 +295,32 @@ async def _run_generate_task(
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"task 异常: {e}")
         return
 
-    urls, usage, n_imgs = _parse_upstream_images(
+    urls, usage, _n_imgs = _parse_upstream_images(
         upstream_json, output_format=str(payload.get("output_format") or "png")
     )
-    text = f"{action_label} {n_imgs} 张 · {usage['total_tokens']} tokens"
+    returned = len(urls)
+    requested = int(payload.get("n") or 1)
+
+    # 上游返回 0 张图 = 业务失败：状态置 failed + 全额退款，不向用户展示假成功
+    if returned == 0:
+        await _finalize_message(
+            factory, ai_msg_id, conv_id, ok=False,
+            text=f"失败：上游未返回任何图片（usage {usage['total_tokens']} tokens）",
+        )
+        await _refund_credits(factory, user_id, ai_msg_id, cost, "上游 data=[] 未返回图片")
+        return
+
+    # 部分缺图：按缺失张数退款（每张 1 分，与 _calculate_cost 对齐）
+    missing = max(0, requested - returned)
+    if missing > 0:
+        await _refund_credits(
+            factory, user_id, ai_msg_id, missing,
+            f"上游仅返回 {returned}/{requested} 张",
+        )
+
+    text = f"{action_label} {returned} 张 · {usage['total_tokens']} tokens"
+    if missing > 0:
+        text += f"（请求 {requested} 张，已退 {missing} 积分）"
     params = {
         "model": upstream_json.get("model", payload.get("model")),
         "usage": usage,
@@ -307,7 +329,7 @@ async def _run_generate_task(
     }
     await _finalize_message(
         factory, ai_msg_id, conv_id, ok=True, text=text,
-        image_urls=urls or None, params=params,
+        image_urls=urls, params=params,
     )
 
 
@@ -408,10 +430,32 @@ async def _run_edit_task(
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"task 异常: {e}")
         return
 
-    urls, usage, n_imgs = _parse_upstream_images(
+    urls, usage, _n_imgs = _parse_upstream_images(
         upstream_json, output_format=str(fields.get("output_format") or "png")
     )
-    text = f"已修改 {n_imgs} 张 · {usage['total_tokens']} tokens"
+    returned = len(urls)
+    requested = int(fields.get("n") or 1)
+
+    # 上游返回 0 张图 = 业务失败：状态置 failed + 全额退款
+    if returned == 0:
+        await _finalize_message(
+            factory, ai_msg_id, conv_id, ok=False,
+            text=f"失败：上游未返回任何图片（usage {usage['total_tokens']} tokens）",
+        )
+        await _refund_credits(factory, user_id, ai_msg_id, cost, "上游 data=[] 未返回图片")
+        return
+
+    # 部分缺图：按缺失张数退款（每张 1 分）
+    missing = max(0, requested - returned)
+    if missing > 0:
+        await _refund_credits(
+            factory, user_id, ai_msg_id, missing,
+            f"上游仅返回 {returned}/{requested} 张",
+        )
+
+    text = f"已修改 {returned} 张 · {usage['total_tokens']} tokens"
+    if missing > 0:
+        text += f"（请求 {requested} 张，已退 {missing} 积分）"
     params = {
         "mode": "edit",
         "model": upstream_json.get("model", fields.get("model")),
@@ -420,7 +464,7 @@ async def _run_edit_task(
     }
     await _finalize_message(
         factory, ai_msg_id, conv_id, ok=True, text=text,
-        image_urls=urls or None, params=params,
+        image_urls=urls, params=params,
     )
 
 
