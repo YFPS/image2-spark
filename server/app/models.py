@@ -64,6 +64,10 @@ class User(Base):
     disabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0"
     )
+    # 邮箱验证完成时间；NULL 表示尚未验证（注册后不发 signup bonus，禁止 generate/edit）
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # signup bonus 发放时间；NULL 表示尚未发放（保证同一用户最多发一次）
+    signup_bonus_granted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.current_timestamp()
     )
@@ -111,6 +115,43 @@ class CreditTransaction(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="credit_transactions")
+
+
+class EmailVerificationToken(Base):
+    """邮箱验证 token：明文只通过邮件发出，库内只存 sha256 hash。"""
+
+    __tablename__ = "email_verification_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uk_evt_token_hash"),
+        Index("idx_evt_user_created", "user_id", "created_at"),
+        Index("idx_evt_expires", "expires_at"),
+        {
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+            "mysql_collate": "utf8mb4_0900_ai_ci",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(MyBigInt(unsigned=True), primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        MyBigInt(unsigned=True),
+        ForeignKey("users.id", ondelete="CASCADE", name="fk_evt_user"),
+        nullable=False,
+    )
+    # sha256(token_plain) 的小写 hex 串（64 字符）
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    purpose: Mapped[str] = mapped_column(
+        Enum("verify_email", name="email_verification_purpose"),
+        nullable=False,
+        default="verify_email",
+        server_default="verify_email",
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # used_at IS NULL 表示未消费；任一 token 验证成功时，同一 user 其他未用 token 都置为 NOW()
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.current_timestamp()
+    )
 
 
 class Conversation(Base):
