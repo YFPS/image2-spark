@@ -29,6 +29,25 @@ async def lifespan(app: FastAPI):
     if not settings.jwt_secret:
         raise RuntimeError("JWT_SECRET 未配置，拒绝启动")
 
+    # 生产环境邮件 provider 必须能真实发信
+    if settings.app_env == "production":
+        if settings.email_provider in {"console", "null"}:
+            raise RuntimeError("生产环境禁止使用 console/null 邮件 provider")
+        if not settings.email_verify_base_url.startswith("https://"):
+            raise RuntimeError("生产环境 EMAIL_VERIFY_BASE_URL 必须使用 https")
+    # SMTP provider 启用时校验基本配置（host/user/pass/from）
+    if settings.email_provider == "smtp":
+        required = [
+            settings.smtp_host,
+            settings.smtp_user,
+            settings.smtp_pass,
+            settings.smtp_from or settings.smtp_user,
+        ]
+        if not all(required):
+            raise RuntimeError(
+                "EMAIL_PROVIDER=smtp 但 SMTP_HOST/SMTP_USER/SMTP_PASS/SMTP_FROM 未配齐"
+            )
+
     # DB 探活
     engine = get_engine()
     async with engine.connect() as conn:
