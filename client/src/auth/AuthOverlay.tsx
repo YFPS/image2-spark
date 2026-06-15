@@ -237,7 +237,7 @@ export function AuthOverlay() {
               <button
                 type="submit"
                 disabled={busy}
-                className="mt-5 h-[50px] w-full rounded-full text-[14px] font-semibold tracking-normal text-[#0D0D0D] transition-all hover:brightness-105 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60"
+                className="mt-5 h-[50px] w-full rounded-full text-[14px] font-semibold tracking-normal text-[#0D0D0D] transition-all active:scale-[0.98] disabled:cursor-wait disabled:opacity-60 md:hover:brightness-105"
                 style={{
                   background: ACCENT,
                   boxShadow: "0 0 24px rgba(240,254,45,0.35)",
