@@ -39,12 +39,12 @@ export function GalleryPage({ onPreview }: Props) {
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col gap-3 overflow-hidden">
       <div className="flex shrink-0 items-center gap-3 px-1">
-        <h1 className="text-[22px] font-medium leading-tight text-white/95">画廊</h1>
+        <h1 className="text-[18px] font-medium leading-tight text-white/95 sm:text-[22px]">画廊</h1>
         <span className="text-[12px] text-white/45">你的全部作品</span>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto rounded-[28px] bg-white/[0.02] p-4 [scrollbar-color:rgba(255,255,255,0.16)_transparent] [scrollbar-width:thin]">
+      <div className="min-h-0 flex-1 overflow-y-auto rounded-[28px] bg-white/[0.02] p-3 sm:p-4 [scrollbar-color:rgba(255,255,255,0.16)_transparent] [scrollbar-width:thin]">
         {loading && items.length === 0 ? (
-          <div className="grid grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-3 md:grid-cols-4">
             {Array.from({ length: 8 }).map((_, i) => (
               <div
                 key={i}
@@ -58,7 +58,7 @@ export function GalleryPage({ onPreview }: Props) {
           </div>
         ) : (
           <>
-            <div className="grid grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-3 md:grid-cols-4">
               {items.map((it) => (
                 <button
                   key={it.message_id}
@@ -75,11 +75,11 @@ export function GalleryPage({ onPreview }: Props) {
                       (e.currentTarget as HTMLImageElement).style.visibility = "hidden";
                     }}
                   />
-                  <span className="absolute left-2 top-2 rounded-full bg-black/55 px-2 py-0.5 text-[10px] text-white/82">
+                  <span className="absolute left-1.5 top-1.5 rounded-full bg-black/55 px-1.5 py-0.5 text-[10px] text-white/82 sm:left-2 sm:top-2 sm:px-2">
                     {formatRelativeTime(it.created_at)}
                   </span>
                   {it.image_count > 1 && (
-                    <span className="absolute bottom-1.5 right-1.5 rounded-full bg-black/55 px-1.5 py-0.5 text-[10px] text-white/82">
+                    <span className="absolute bottom-1 right-1 rounded-full bg-black/55 px-1.5 py-0.5 text-[10px] text-white/82 sm:bottom-1.5 sm:right-1.5">
                       +{it.image_count - 1}
                     </span>
                   )}
