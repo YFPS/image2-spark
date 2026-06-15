@@ -18,6 +18,7 @@ import {
   resendVerification as apiResendVerification,
   setToken,
   verifyEmail as apiVerifyEmail,
+  type TokenResponse,
   type UserPublic,
 } from "../api/auth";
 
@@ -35,6 +36,7 @@ type AuthState = {
   clearVerifyFlash: () => void;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, nickname?: string) => Promise<void>;
+  completeAuth: (response: TokenResponse) => void;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
   verifyEmailToken: (token: string) => Promise<void>;
@@ -73,6 +75,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [verifyFlash, setVerifyFlash] = useState<VerifyFlash>(null);
 
   const clearVerifyFlash = useCallback(() => setVerifyFlash(null), []);
+
+  const completeAuth = useCallback((response: TokenResponse) => {
+    setToken(response.access_token);
+    setUser(response.user);
+    setVerificationEmailSent(response.verification_email_sent ?? null);
+    setStatus("authenticated");
+  }, []);
 
   const refresh = useCallback(async () => {
     const t = getToken();
@@ -148,21 +157,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (email: string, password: string) => {
     const r = await apiLogin({ email, password });
-    setToken(r.access_token);
-    setUser(r.user);
-    setVerificationEmailSent(null);
-    setStatus("authenticated");
-  }, []);
+    completeAuth(r);
+  }, [completeAuth]);
 
   const register = useCallback(
     async (email: string, password: string, nickname?: string) => {
       const r = await apiRegister({ email, password, nickname });
-      setToken(r.access_token);
-      setUser(r.user);
-      setVerificationEmailSent(r.verification_email_sent);
-      setStatus("authenticated");
+      completeAuth(r);
     },
-    [],
+    [completeAuth],
   );
 
   const logout = useCallback(async () => {
@@ -195,6 +198,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       clearVerifyFlash,
       login,
       register,
+      completeAuth,
       logout,
       refresh,
       verifyEmailToken,
@@ -208,6 +212,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       clearVerifyFlash,
       login,
       register,
+      completeAuth,
       logout,
       refresh,
       verifyEmailToken,

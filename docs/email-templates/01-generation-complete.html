@@ -18,8 +18,9 @@
     cost              用时（如 18.4s）
     credits_used      本次扣费配额（如 6）
     credits_remaining 剩余配额
-    thumb_url         缩略图外链 URL（建议 ≤512KB JPG/PNG）
-    task_id           任务 ID（小字角标，也用于拼 https://image2.app/c/{{task_id}} 跳转）
+    task_id           任务 ID（小字角标，也用于拼 https://image2.destinys.cn/c/{{task_id}} 跳转，
+                      并通过 https://image2.destinys.cn/api/thumb/{{task_id}}.jpg 由业务后端 302 到真正的 CDN 缩略图，
+                      避免把整条外链 URL 当变量传给腾讯云 SES）
     year              当前年份
 -->
 </head>
@@ -90,8 +91,8 @@
                   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#0B0D11;border:1px solid #1F232B;border-radius:10px;">
                     <tr>
                       <td align="center" style="padding:0;line-height:0;">
-                        <a href="https://image2.app/c/{{task_id}}" style="display:block;text-decoration:none;">
-                          <img src="{{thumb_url}}" alt="生成结果预览" width="560" style="display:block;width:100%;max-width:560px;height:auto;border-radius:9px;border:0;outline:none;">
+                        <a href="https://image2.destinys.cn/c/{{task_id}}" style="display:block;text-decoration:none;">
+                          <img src="https://image2.destinys.cn/api/thumb/{{task_id}}.jpg" alt="生成结果预览" width="560" style="display:block;width:100%;max-width:560px;height:auto;border-radius:9px;border:0;outline:none;">
                         </a>
                       </td>
                     </tr>
@@ -141,14 +142,14 @@
                   <table role="presentation" cellpadding="0" cellspacing="0" border="0">
                     <tr>
                       <td bgcolor="#FFD400" style="border-radius:12px;">
-                        <a href="https://image2.app/c/{{task_id}}"
+                        <a href="https://image2.destinys.cn/c/{{task_id}}"
                            style="display:inline-block;padding:14px 28px;font-size:14px;font-weight:700;line-height:1;color:#0B0D11;text-decoration:none;border-radius:12px;letter-spacing:0.02em;">
                           在画布中查看 →
                         </a>
                       </td>
                       <td style="width:14px;">&nbsp;</td>
                       <td>
-                        <a href="https://image2.app/c/{{task_id}}?action=download"
+                        <a href="https://image2.destinys.cn/c/{{task_id}}?action=download"
                            style="display:inline-block;padding:14px 18px;font-size:13px;line-height:1;color:#B0B5BE;text-decoration:none;border:1px solid #2A2F38;border-radius:12px;">
                           下载原图
                         </a>
@@ -169,7 +170,7 @@
               <tr>
                 <td align="left" style="font-size:12px;line-height:1.7;color:#6B7280;">
                   这封邮件由 image2 自动发送 · 不需要回复<br>
-                  问题反馈：<a href="mailto:support@image2.app" style="color:#9CA3AF;text-decoration:none;border-bottom:1px solid #2A2F38;">support@image2.app</a>
+                  问题反馈：<a href="mailto:support@mona.destinys.cn" style="color:#9CA3AF;text-decoration:none;border-bottom:1px solid #2A2F38;">support@mona.destinys.cn</a>
                 </td>
                 <td align="right" valign="bottom" style="font-size:12px;line-height:1.7;color:#3A3F49;">
                   © {{year}} image2

@@ -30,7 +30,7 @@ def get_engine() -> AsyncEngine:
         raise RuntimeError("DATABASE_URL 未配置")
     return create_async_engine(
         settings.database_url,
-        pool_pre_ping=True,
+        pool_pre_ping=False,
         pool_recycle=3600,  # 一小时强制回收，规避 RDS 默认 wait_timeout
         echo=False,
     )

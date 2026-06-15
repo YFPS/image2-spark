@@ -37,11 +37,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }
 
   return (
-    <>
+    <div className="relative min-h-screen">
       {children}
       <UserBadge />
       <VerifyFlashToast />
-    </>
+    </div>
   );
 }
 

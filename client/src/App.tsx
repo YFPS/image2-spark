@@ -685,7 +685,8 @@ function SimpleGenerateView({
   // 注意：与 setResults/setUsage 那组 in-memory 预览状态分开，因为预览受 format 影响
   const lastResultSrc = useMemo<string | null>(() => {
     const { images } = extractConversationResults(conversations.current);
-    return images[0] ? imageToSrc(images[0], format) : null;
+    const raw = images[0] ? imageToSrc(images[0], format) : null;
+    return raw ? safeImageSrc(raw) : null;
   }, [conversations.current, format]);
   // 参考图：支持多张；refImages[0] 与 refMaskBlob 对齐（mask 仅作用于第 1 张）
   type RefItem = { id: string; dataURL: string };
@@ -2458,7 +2459,8 @@ function ResultGallery({
       {/* 缩略图行 */}
       <div className="flex shrink-0 gap-2 overflow-x-auto pb-0.5 [scrollbar-color:rgba(255,255,255,0.16)_transparent] [scrollbar-width:thin]">
         {images.map((img, i) => {
-          const src = imageToSrc(img, format);
+          const rawSrc = imageToSrc(img, format);
+          const src = rawSrc ? safeImageSrc(rawSrc) : null;
           return (
             <button
               key={i}

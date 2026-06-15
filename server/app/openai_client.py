@@ -184,11 +184,16 @@ async def call_images_generate(payload: dict[str, Any]) -> dict[str, Any]:
 async def call_images_edit(
     fields: dict[str, Any],
     files: dict[str, tuple[str, bytes, str]] | list[tuple[str, tuple[str, bytes, str]]],
+    *,
+    force_backup: bool = False,
 ) -> dict[str, Any]:
-    """调上游 /images/edits（multipart），返回解析后的 JSON。主上游失败按规则回退备用上游一次。
+    """调上游 /images/edits（multipart），返回解析后的 JSON。
+
+    - force_backup=False（默认）：主上游失败按规则回退备用上游一次。
+    - force_backup=True：直接走备用上游（多图时 tabcode 不支持，自动切飞鱼）。
 
     files 既可是 dict（单图：{"image": ("image.png", bytes, "image/png"), "mask": (...)}），
-    也可是 list[(name, (filename, bytes, content_type))]（多图：同名多段，name 用 "image[]"）。
+    也可是 list[(name, (filename, bytes, content_type))]（多图：同名多段，name 用 "image"）。
     fields 是其他文本字段。
     """
     settings = get_settings()
@@ -196,6 +201,28 @@ async def call_images_edit(
         raise UpstreamError(500, "服务端未配置 OPENAI_API_KEY")
 
     safe_prompt = (fields.get("prompt") or "")[:200]
+
+    if force_backup:
+        backup_url = settings.openai_base_url_backup
+        backup_key = settings.openai_api_key_backup
+        if not (backup_url and backup_key):
+            raise UpstreamError(500, "备用上游未配置（OPENAI_API_KEY_BACKUP / OPENAI_BASE_URL_BACKUP）")
+        logger.info(
+            "→ [备用上游] upstream images.edits model=%s size=%s n=%s prompt=%s",
+            fields.get("model"),
+            fields.get("size"),
+            fields.get("n"),
+            safe_prompt,
+        )
+        return await _post_multipart_once(
+            backup_url,
+            backup_key,
+            "/images/edits",
+            fields,
+            files,
+            settings.openai_timeout,
+        )
+
     logger.info(
         "→ upstream images.edits model=%s size=%s n=%s prompt=%s",
         fields.get("model"),

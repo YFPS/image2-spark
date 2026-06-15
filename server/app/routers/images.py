@@ -18,6 +18,7 @@ Python 3.13 已原生支持 list[X] / X | Y 语法，不需要 future。
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime
 from typing import Any
@@ -25,7 +26,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +42,7 @@ from ..openai_client import (
     call_images_generate,
 )
 from ..rate_limit import get_limiter, user_id_key
+from ..redis_client import cache_image_get, cache_image_set
 from ..schemas import (
     ErrorDetail,
     ErrorResponse,
@@ -405,11 +407,12 @@ async def _run_edit_task(
     user_id: int,
     cost: int,
     dropped_refs: int = 0,
+    force_backup: bool = False,
 ) -> None:
     """后台任务：调上游 edit，回写 message。失败时退款。"""
     factory = get_session_factory()
     try:
-        upstream_json = await call_images_edit(fields, files)
+        upstream_json = await call_images_edit(fields, files, force_backup=force_backup)
     except UpstreamTimeout as e:
         await _finalize_message(
             factory, ai_msg_id, conv_id, ok=False, text=f"失败：上游超时 ({e})"
@@ -459,6 +462,8 @@ async def _run_edit_task(
         text += f"（请求 {requested} 张，已退 {missing} 积分）"
     if dropped_refs > 0:
         text += f"（已忽略 {dropped_refs} 张副参考图，当前上游仅支持单图）"
+    if force_backup:
+        text += "（多图模式，已自动切换备用上游）"
     params = {
         "mode": "edit",
         "model": upstream_json.get("model", fields.get("model")),
@@ -557,12 +562,19 @@ async def edit(
         "n": str(n),
         "background": background,
     }
-    # 上游字段名固定 image（单数）：tabcode 不识别 image[]；OpenAI/feiyuai 都兼容单图 image。
-    # 多图时只取主图（image_payloads[0]），副图丢弃 + 在文案里告知用户已忽略
-    dropped_refs = max(0, len(image_payloads) - 1)
-    main_payload = image_payloads[0]
-    files: list[tuple[str, tuple[str, bytes, str]]] = [("image", main_payload)]
-    files.append(("mask", ("mask.png", mask_bytes, "image/png")))
+    # 多图 → 自动切到飞鱼（feiyuai 支持多图）；单图 → 走 tabcode 主上游
+    multi = len(image_payloads) > 1
+    if multi:
+        files: list[tuple[str, tuple[str, bytes, str]]] = [
+            ("image", p) for p in image_payloads
+        ]
+        files.append(("mask", ("mask.png", mask_bytes, "image/png")))
+        dropped_refs = 0
+    else:
+        dropped_refs = 0
+        main_payload = image_payloads[0]
+        files = [("image", main_payload)]
+        files.append(("mask", ("mask.png", mask_bytes, "image/png")))
 
     init_params = {
         "mode": "edit",
@@ -579,6 +591,7 @@ async def edit(
         _run_edit_task(
             msg.id, conv.id, fields, files, user_id=user.id, cost=cost,
             dropped_refs=dropped_refs,
+            force_backup=multi,
         )
     )
     _ = model  # 显式吸收 unused 参数避免 lint
@@ -586,7 +599,7 @@ async def edit(
     return JSONResponse(content=_to_msg_out(msg).model_dump(mode="json"))
 
 
-# ===== 不变：proxy-image / segment / brush-cutout =====
+# ===== proxy-image / segment / brush-cutout =====
 
 
 @router.get("/proxy-image")
@@ -596,9 +609,10 @@ async def proxy_image(
 ) -> Response:
     """反代上游 CDN 图片，规避前端 canvas 跨域 taint。
 
-    无鉴权（要支持 <img src> 直接用），但限制 host：
-    - 协议仅 http / https
-    - host 必须在 PROXY_IMAGE_HOST_ALLOWLIST 内（生产必须配；为空时只允许 OPENAI_BASE_URL 所在 host）
+    === 优化 (v2) ===
+    - 流式返回：边下载边推给浏览器，消除首字节等待
+    - Redis 缓存：第二次请求同一张图直接从缓存出
+    - 无鉴权（要支持 <img src> 直接用）；host 白名单同 v1
     - 限流由全局 IP rate_limit_global 覆盖（120/分钟）
     """
     settings = get_settings()
@@ -617,7 +631,6 @@ async def proxy_image(
             content={"error": {"code": "validation_error", "message": "URL 缺少 host"}},
         )
 
-    # 允许的 host：env 配置 + OPENAI_BASE_URL / OPENAI_BASE_URL_BACKUP 的 host 兜底
     allow = set(settings.proxy_image_host_allowlist)
     for base in (settings.openai_base_url, settings.openai_base_url_backup):
         if base:
@@ -635,51 +648,73 @@ async def proxy_image(
             },
         )
 
+    # ① 尝试 Redis 缓存 → 命中则流式返回（64KB 分块）
+    cached = await cache_image_get(url)
+    if cached is not None:
+        hdr_len = int.from_bytes(cached[:4], "little")
+        meta = json.loads(cached[4 : 4 + hdr_len].decode("utf-8"))
+        body = cached[4 + hdr_len:]
+        return StreamingResponse(
+            _chunk_iter(body),
+            media_type=meta["ct"],
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+
+    # ② 缓存 miss → 流式下载 + 后台缓存
+    max_bytes = 50 * 1024 * 1024
+
+    # 先 HEAD 拿到 Content-Type
     try:
-        async with httpx.AsyncClient(timeout=settings.openai_timeout) as client:
-            r = await client.get(url)
-    except httpx.HTTPError as e:
-        return JSONResponse(
-            status_code=502,
-            content={"error": {"code": "upstream_error", "message": f"拉取图片失败：{e}"}},
-        )
+        async with httpx.AsyncClient(timeout=15) as head_client:
+            head_resp = await head_client.head(url)
+            ct = head_resp.headers.get("Content-Type", "")
+            if not ct.startswith("image/"):
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {"code": "validation_error", "message": f"非图片 Content-Type：{ct}"},
+                    },
+                )
+    except httpx.HTTPError:
+        ct = "image/png"  # fallback
 
-    if r.status_code >= 400:
-        return JSONResponse(
-            status_code=r.status_code,
-            content={
-                "error": {
-                    "code": "upstream_error",
-                    "message": f"上游返回 {r.status_code}",
-                    "upstream_status": r.status_code,
-                }
-            },
-        )
+    # 流式转发 + 内存缓冲（供后台写 Redis）
+    async def _pipe():
+        chunks: list[bytes] = []
+        total = 0
+        try:
+            async with httpx.AsyncClient(timeout=settings.openai_timeout) as client:
+                async with client.stream("GET", url) as up_resp:
+                    if up_resp.status_code >= 400:
+                        return  # 流中断，让浏览器感知断连
+                    async for chunk in up_resp.aiter_bytes():
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise HTTPException(status_code=413, detail="图片超过 50 MB")
+                        chunks.append(chunk)
+                        yield chunk
+        except httpx.HTTPError:
+            return  # 静默中断
+        finally:
+            # 流结束后后台写 Redis
+            if chunks:
+                body = b"".join(chunks)
+                meta_bytes = json.dumps({"ct": ct}).encode("utf-8")
+                hdr_packed = len(meta_bytes).to_bytes(4, "little") + meta_bytes + body
+                if len(hdr_packed) <= max_bytes:
+                    asyncio.create_task(cache_image_set(url, hdr_packed))
 
-    content_type = r.headers.get("Content-Type", "")
-    if not content_type.startswith("image/"):
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": {
-                    "code": "validation_error",
-                    "message": f"非图片 Content-Type：{content_type}",
-                }
-            },
-        )
-
-    body = r.content
-    if len(body) > 50 * 1024 * 1024:
-        return JSONResponse(
-            status_code=413,
-            content={"error": {"code": "too_large", "message": "图片超过 50 MB"}},
-        )
-
-    return Response(
-        content=body,
-        media_type=content_type,
+    return StreamingResponse(
+        _pipe(),
+        media_type=ct,
         headers={"Cache-Control": "public, max-age=3600"},
     )
+
+
+def _chunk_iter(data: bytes, size: int = 64 * 1024):
+    """将 bytes 分块 yield，避免 StreamingResponse 一次发完大包"""
+    for i in range(0, len(data), size):
+        yield data[i : i + size]
 
 
 @router.post("/segment")

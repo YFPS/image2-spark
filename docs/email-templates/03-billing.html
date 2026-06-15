@@ -21,8 +21,8 @@
     credits_remaining 当前总剩余配额
     valid_until       有效期截止（如 2026-06-20）
     year              当前年份
-  注：账单中心是静态域名 https://image2.app/billing；
-       收据链接用 order_id 拼出 https://image2.app/billing/invoice/{{order_id}}。
+  注：账单中心是静态域名 https://image2.destinys.cn/billing；
+       收据链接用 order_id 拼出 https://image2.destinys.cn/billing/invoice/{{order_id}}。
        SES 不支持把整个 URL 塞进变量里，所以不再单独传 invoice_url / dashboard_url。
 -->
 </head>
@@ -133,14 +133,14 @@
             <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:24px;">
               <tr>
                 <td bgcolor="#FFD400" style="border-radius:12px;">
-                  <a href="https://image2.app/billing"
+                  <a href="https://image2.destinys.cn/billing"
                      style="display:inline-block;padding:14px 26px;font-size:14px;font-weight:700;line-height:1;color:#0B0D11;text-decoration:none;border-radius:12px;letter-spacing:0.02em;">
                     查看账单中心 →
                   </a>
                 </td>
                 <td style="width:14px;">&nbsp;</td>
                 <td>
-                  <a href="https://image2.app/billing/invoice/{{order_id}}"
+                  <a href="https://image2.destinys.cn/billing/invoice/{{order_id}}"
                      style="display:inline-block;padding:14px 18px;font-size:13px;line-height:1;color:#B0B5BE;text-decoration:none;border:1px solid #2A2F38;border-radius:12px;">
                     下载收据
                   </a>
@@ -159,7 +159,7 @@
                 <td align="left" style="font-size:12px;line-height:1.7;color:#6B7280;">
                   这封邮件由 image2 自动发送 · 不需要回复<br>
                   若对本次扣费有疑问，请联系
-                  <a href="mailto:billing@image2.app" style="color:#9CA3AF;text-decoration:none;border-bottom:1px solid #2A2F38;">billing@image2.app</a>
+                  <a href="mailto:billing@mona.destinys.cn" style="color:#9CA3AF;text-decoration:none;border-bottom:1px solid #2A2F38;">billing@mona.destinys.cn</a>
                 </td>
                 <td align="right" valign="bottom" style="font-size:12px;line-height:1.7;color:#3A3F49;">
                   © {{year}} image2
