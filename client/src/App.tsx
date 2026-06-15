@@ -44,6 +44,10 @@ import { conversationHasPendingGeneration } from "./conversation/pendingGenerati
 import { extractConversationResults } from "./conversation/conversationResults";
 import { RefImagesStrip } from "./components/RefImagesStrip";
 import { REF_MAX, extractImageFilesFromEvent, fileToDataURL } from "./utils/imageInput";
+import { useIsMobile } from "./hooks/useMediaQuery";
+import { MobileCanvas } from "./components/mobile/MobileCanvas";
+import { MobileNodePanel } from "./components/mobile/MobileNodePanel";
+import { MobileDebugPanel } from "./components/mobile/MobileDebugPanel";
 
 // 角色 → 侧边栏副标显示
 const ROLE_LABEL: Record<"admin" | "user" | "paid", string> = {
@@ -213,7 +217,7 @@ const PORT_HIT_R = 16;
 export default function App() {
   const [mode] = useState<AppMode>("generate");
   const [instances, setInstances] = useState<NodeInstance[]>(INITIAL_INSTANCES);
-  const [selectedId, setSelectedId] = useState<string>("model-1");
+  const [selectedId, setSelectedId] = useState<string | null>("model-1");
   const [glassParams, setGlassParams] = useState<GlassParams>(() => loadStoredParams());
   const [generateGlassShapes, setGenerateGlassShapes] = useState<GlassShape[]>([]);
   const [edges, setEdges] = useState<Edge[]>(INITIAL_EDGES);
@@ -396,6 +400,128 @@ export default function App() {
 
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
 
+  // 移动端检测
+  const isMobile = useIsMobile();
+
+  // 移动端触摸：节点拖拽
+  const handleMobileNodeDrag = useCallback(
+    (id: string, delta: { x: number; y: number }) => {
+      setInstances((arr) =>
+        arr.map((i) =>
+          i.id === id
+            ? { ...i, position: { x: i.position.x + delta.x, y: i.position.y + delta.y } }
+            : i,
+        ),
+      );
+    },
+    [],
+  );
+
+  // 移动端触摸：节点拖拽开始
+  const handleMobileNodeDragStart = useCallback((id: string) => {
+    setSelectedId(id);
+  }, []);
+
+  // 移动端触摸：点击空白处取消选择
+  const handleCanvasTap = useCallback((_point: { x: number; y: number }) => {
+    setSelectedId(null);
+    setContextMenu(null);
+  }, []);
+
+  // 移动端触摸：双击（暂无特殊行为）
+  const handleCanvasDoubleTap = useCallback((_point: { x: number; y: number }) => {
+    // 双击空白处可扩展为"适应画布"等操作
+  }, []);
+
+  // 移动端触摸：长按显示添加节点菜单（替代右键）
+  const handleCanvasLongPress = useCallback((point: { x: number; y: number }) => {
+    setContextMenu({
+      screenX: point.x,
+      screenY: point.y,
+      canvasX: point.x,
+      canvasY: point.y - TOPBAR_H,
+    });
+  }, []);
+
+  // 移动端触摸：双指缩放
+  const handlePinchZoom = useCallback((_scale: number) => {
+    // 预留缩放逻辑
+  }, []);
+
+  // 移动端触摸：端口触摸开始（开始绘制连线）
+  const handlePortTouchStart = useCallback(
+    (instanceId: string, portId: string, point: { x: number; y: number }) => {
+      const inst = getInst(instanceId);
+      if (!inst) return;
+      const portDef = NODES[inst.type].ports.find((p) => p.id === portId);
+      if (!portDef) return;
+      const a = anchor(inst.position, NODES[inst.type], portId);
+      const toLocal = (cx: number, cy: number): Point => ({ x: cx, y: cy - TOPBAR_H });
+
+      setDraftEdge({
+        fromInstance: instanceId,
+        fromPort: portId,
+        origin: { x: a.x, y: a.y },
+        color: a.color,
+        side: portDef.side,
+        mouse: toLocal(point.x, point.y),
+      });
+
+      const onMove = (ev: TouchEvent) => {
+        const t = ev.touches[0];
+        if (t) setDraftEdge((d) => (d ? { ...d, mouse: toLocal(t.clientX, t.clientY) } : d));
+      };
+      const onEnd = (ev: TouchEvent) => {
+        window.removeEventListener("touchmove", onMove);
+        window.removeEventListener("touchend", onEnd);
+        const t = ev.changedTouches[0];
+        if (t) {
+          const target = hitTestPort(toLocal(t.clientX, t.clientY));
+          if (target && target.instanceId !== instanceId) {
+            const targetInst = getInst(target.instanceId);
+            const targetDef = targetInst
+              ? NODES[targetInst.type].ports.find((p) => p.id === target.portId)
+              : undefined;
+            if (
+              targetDef &&
+              targetDef.color === portDef.color &&
+              targetDef.side !== portDef.side
+            ) {
+              setEdges((es) => {
+                const newEdge: Edge =
+                  portDef.side === "right"
+                    ? { from: [instanceId, portId], to: [target.instanceId, target.portId] }
+                    : { from: [target.instanceId, target.portId], to: [instanceId, portId] };
+                if (
+                  es.some(
+                    (x) =>
+                      x.from[0] === newEdge.from[0] &&
+                      x.from[1] === newEdge.from[1] &&
+                      x.to[0] === newEdge.to[0] &&
+                      x.to[1] === newEdge.to[1],
+                  )
+                ) {
+                  return es;
+                }
+                const filtered = es.filter(
+                  (x) => !(x.to[0] === newEdge.to[0] && x.to[1] === newEdge.to[1]),
+                );
+                return [...filtered, newEdge];
+              });
+            }
+          }
+        }
+        setDraftEdge(null);
+      };
+      window.addEventListener("touchmove", onMove, { passive: true });
+      window.addEventListener("touchend", onEnd, { passive: true });
+    },
+    [getInst, hitTestPort],
+  );
+
+  // 当前选中的节点实例
+  const selectedNode = selectedId ? instances.find(i => i.id === selectedId) : null;
+
   // 所有实例的 WebGL 玻璃形状（按 TopBar 高 偏移）
   const glassShapes: GlassShape[] =
     mode === "workflow"
@@ -467,8 +593,13 @@ export default function App() {
             return (
               <span
                 key={`handle-${inst.id}.${p.id}`}
+                data-port-handle
+                data-port-instance={inst.id}
+                data-port-id={p.id}
                 onMouseDown={(e) => startEdge(inst.id, p.id, e)}
-                className="absolute z-30 h-5 w-5 -translate-x-1/2 -translate-y-1/2 cursor-crosshair rounded-full transition-colors hover:bg-white/[0.08]"
+                className={`absolute z-30 -translate-x-1/2 -translate-y-1/2 cursor-crosshair rounded-full transition-colors hover:bg-white/[0.08] ${
+                  isMobile ? "h-8 w-8" : "h-5 w-5"
+                }`}
                 style={{ left: a.x, top: a.y }}
                 title={`${inst.id}.${p.id}`}
               />
@@ -476,23 +607,56 @@ export default function App() {
           }),
         )}
 
-        {/* 节点层 —— 按实例数组渲染 */}
-        {instances.map((inst) => {
-          const common = {
-            key: inst.id,
-            pos: inst.position,
-            selected: selectedId === inst.id,
-            onSelect: () => setSelectedId(inst.id),
-            onDragStart: (e: ReactMouseEvent) => startDrag(inst.id, e),
-          };
-          switch (inst.type) {
-            case "model":          return <ModelNode {...common} />;
-            case "prompt":         return <PromptNode {...common} />;
-            case "negativePrompt": return <NegativePromptNode {...common} />;
-            case "imageGen":       return <ImageGenNode {...common} />;
-            case "preview":        return <PreviewNode {...common} />;
-          }
-        })}
+        {/* 移动端用 MobileCanvas 包装节点层，桌面端直接渲染 */}
+        {isMobile ? (
+          <MobileCanvas
+            onNodeDrag={handleMobileNodeDrag}
+            onNodeDragStart={handleMobileNodeDragStart}
+            onCanvasTap={handleCanvasTap}
+            onCanvasDoubleTap={handleCanvasDoubleTap}
+            onCanvasLongPress={handleCanvasLongPress}
+            onPinchZoom={handlePinchZoom}
+            onPortTouchStart={handlePortTouchStart}
+          >
+            {/* 节点层 —— 按实例数组渲染 */}
+            {instances.map((inst) => {
+              const common = {
+                key: inst.id,
+                instanceId: inst.id,
+                pos: inst.position,
+                selected: selectedId === inst.id,
+                onSelect: () => setSelectedId(inst.id),
+                onDragStart: (e: ReactMouseEvent) => startDrag(inst.id, e),
+              };
+              switch (inst.type) {
+                case "model":          return <ModelNode {...common} />;
+                case "prompt":         return <PromptNode {...common} />;
+                case "negativePrompt": return <NegativePromptNode {...common} />;
+                case "imageGen":       return <ImageGenNode {...common} />;
+                case "preview":        return <PreviewNode {...common} />;
+              }
+            })}
+          </MobileCanvas>
+        ) : (
+          /* 节点层 —— 按实例数组渲染 */
+          instances.map((inst) => {
+            const common = {
+              key: inst.id,
+              instanceId: inst.id,
+              pos: inst.position,
+              selected: selectedId === inst.id,
+              onSelect: () => setSelectedId(inst.id),
+              onDragStart: (e: ReactMouseEvent) => startDrag(inst.id, e),
+            };
+            switch (inst.type) {
+              case "model":          return <ModelNode {...common} />;
+              case "prompt":         return <PromptNode {...common} />;
+              case "negativePrompt": return <NegativePromptNode {...common} />;
+              case "imageGen":       return <ImageGenNode {...common} />;
+              case "preview":        return <PreviewNode {...common} />;
+            }
+          })
+        )}
 
         <CanvasToolbar />
 
@@ -507,9 +671,99 @@ export default function App() {
         )}
       </div>
 
+      {/* 移动端节点属性面板 */}
+      <MobileNodePanel
+        nodeId={selectedId}
+        nodeType={selectedNode?.type || ''}
+        onClose={() => setSelectedId(null)}
+      >
+        {selectedNode?.type === 'model' && (
+          <div className="space-y-4">
+            <div className="rounded-[14px] border border-white/[0.04] bg-[#141418] px-3 py-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[14px] font-medium text-white/90">DreamShaper 6 (SD1.5)</span>
+                <button className="grid h-7 w-7 place-items-center rounded-[8px] bg-[#0a0a0d] text-white/85">
+                  <Chevron dir="down" size={9} />
+                </button>
+              </div>
+            </div>
+            <div className="space-y-2 text-[13px] text-white/55">
+              <div className="flex items-center justify-between">
+                <span>模型</span>
+                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: C.model, boxShadow: `0 0 6px ${C.model}` }} />
+              </div>
+              <div className="flex items-center justify-between">
+                <span>正向</span>
+                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: C.positive, boxShadow: `0 0 6px ${C.positive}` }} />
+              </div>
+              <div className="flex items-center justify-between">
+                <span>负面</span>
+                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: C.negative, boxShadow: `0 0 6px ${C.negative}` }} />
+              </div>
+            </div>
+          </div>
+        )}
+        {selectedNode?.type === 'prompt' && (
+          <div className="space-y-3">
+            <p className="text-[13px] leading-relaxed text-white/70">A black bear with a pink snout, minimalist style, soft gradients, clear blue sky</p>
+            <div className="rounded-[14px] border border-white/[0.04] bg-[#141418] px-3.5 py-2.5">
+              <textarea
+                placeholder="输入你想要的画面内容"
+                className="w-full resize-none bg-transparent text-[14px] text-white/85 placeholder:text-white/35 focus:outline-none"
+                rows={3}
+              />
+            </div>
+          </div>
+        )}
+        {selectedNode?.type === 'negativePrompt' && (
+          <div className="space-y-3">
+            <p className="text-[13px] leading-relaxed text-white/70">No text, unnecessary details, background objects, other animals or people.</p>
+            <div className="rounded-[14px] border border-white/[0.04] bg-[#141418] px-3.5 py-2.5">
+              <textarea
+                placeholder="输入你不想要的内容"
+                className="w-full resize-none bg-transparent text-[14px] text-white/85 placeholder:text-white/35 focus:outline-none"
+                rows={3}
+              />
+            </div>
+          </div>
+        )}
+        {selectedNode?.type === 'imageGen' && (
+          <div className="space-y-4">
+            <div className="rounded-[14px] border border-white/[0.04] bg-[#141418] p-4">
+              <div className="flex items-center justify-between text-[14px]">
+                <span className="text-white/55">质量</span>
+                <span className="text-white/90">low</span>
+              </div>
+            </div>
+            <div className="rounded-[14px] border border-white/[0.04] bg-[#141418] p-4">
+              <div className="flex items-center justify-between text-[14px]">
+                <span className="text-white/55">比例</span>
+                <span className="text-white/90">1:1</span>
+              </div>
+            </div>
+            <div className="rounded-[14px] border border-white/[0.04] bg-[#141418] p-4">
+              <div className="flex items-center justify-between text-[14px]">
+                <span className="text-white/55">分辨率</span>
+                <span className="text-white/90">1K</span>
+              </div>
+            </div>
+          </div>
+        )}
+        {selectedNode?.type === 'preview' && (
+          <div className="flex items-center justify-center py-8">
+            <div className="flex h-40 w-40 items-center justify-center rounded-[14px] border border-white/[0.04] bg-[#141418]">
+              <span className="text-[13px] text-white/35">预览区域</span>
+            </div>
+          </div>
+        )}
+      </MobileNodePanel>
+
       <Telemetry />
         </>
       )}
+
+      {/* 移动端调试面板 - 仅在开发环境显示 */}
+      {import.meta.env.DEV && <MobileDebugPanel />}
     </div>
   );
 }
@@ -2636,11 +2890,13 @@ function DraftWire({
 
 /* ---------- Prompt 节点（1:1 参考图 #9）---------- */
 function PromptNode({
+  instanceId,
   pos,
   selected,
   onSelect,
   onDragStart,
 }: {
+  instanceId: string;
   pos: Point;
   selected: boolean;
   onSelect: () => void;
@@ -2648,7 +2904,7 @@ function PromptNode({
 }) {
   return (
     <div
-      data-node-instance
+      data-node-instance={instanceId}
       className="absolute z-20 select-none"
       style={{ left: pos.x, top: pos.y, width: PROMPT_CARD_W, height: PROMPT_CARD_H }}
       onMouseDown={(e) => dragOrSkip(e, onSelect, onDragStart)}
@@ -2683,11 +2939,13 @@ function PromptNode({
 
 /* ---------- Negative Prompt 节点（结构与 Prompt 一致） ---------- */
 function NegativePromptNode({
+  instanceId,
   pos,
   selected,
   onSelect,
   onDragStart,
 }: {
+  instanceId: string;
   pos: Point;
   selected: boolean;
   onSelect: () => void;
@@ -2695,7 +2953,7 @@ function NegativePromptNode({
 }) {
   return (
     <div
-      data-node-instance
+      data-node-instance={instanceId}
       className="absolute z-20 select-none"
       style={{ left: pos.x, top: pos.y, width: NEGATIVE_PROMPT_CARD_W, height: NEGATIVE_PROMPT_CARD_H }}
       onMouseDown={(e) => dragOrSkip(e, onSelect, onDragStart)}
@@ -2810,11 +3068,13 @@ function SparkleIcon() {
 
 /* ---------- Image Generator 节点（1:1 参考图 #11）---------- */
 function ImageGenNode({
+  instanceId,
   pos,
   selected,
   onSelect,
   onDragStart,
 }: {
+  instanceId: string;
   pos: Point;
   selected: boolean;
   onSelect: () => void;
@@ -2822,7 +3082,7 @@ function ImageGenNode({
 }) {
   return (
     <div
-      data-node-instance
+      data-node-instance={instanceId}
       className="absolute z-20 select-none"
       style={{ left: pos.x, top: pos.y, width: IMAGE_GEN_CARD_W, height: IMAGE_GEN_CARD_H }}
       onMouseDown={(e) => dragOrSkip(e, onSelect, onDragStart)}
@@ -2968,11 +3228,13 @@ function StepperControl({ value }: { value: number }) {
 /* ---------- Preview 节点 ---------- */
 /* ---------- Preview Image 节点（1:1 参考图 #13）---------- */
 function PreviewNode({
+  instanceId,
   pos,
   selected,
   onSelect,
   onDragStart,
 }: {
+  instanceId: string;
   pos: Point;
   selected: boolean;
   onSelect: () => void;
@@ -2980,7 +3242,7 @@ function PreviewNode({
 }) {
   return (
     <div
-      data-node-instance
+      data-node-instance={instanceId}
       className="absolute z-20 select-none"
       style={{ left: pos.x, top: pos.y, width: PREVIEW_CARD_W, height: PREVIEW_CARD_H }}
       onMouseDown={(e) => dragOrSkip(e, onSelect, onDragStart)}
@@ -3240,11 +3502,13 @@ function DownloadIcon() {
 
 /* ---------- Model 节点（1:1 复刻参考图） ---------- */
 function ModelNode({
+  instanceId,
   pos,
   selected,
   onSelect,
   onDragStart,
 }: {
+  instanceId: string;
   pos: Point;
   selected: boolean;
   onSelect: () => void;
@@ -3253,7 +3517,7 @@ function ModelNode({
   const def = NODES.model;
   return (
     <div
-      data-node-instance
+      data-node-instance={instanceId}
       className="absolute z-20 select-none"
       style={{ left: pos.x, top: pos.y, width: def.width }}
       onMouseDown={(e) => dragOrSkip(e, onSelect, onDragStart)}

@@ -11,6 +11,7 @@ import FragmentBgVblurShader from "./shaders/fragment-bg-vblur.glsl?raw";
 import FragmentBgHblurShader from "./shaders/fragment-bg-hblur.glsl?raw";
 import FragmentMainShader from "./shaders/fragment-main.glsl?raw";
 import type { GlassParams } from "./GlassControls";
+import { useIsMobile } from "./hooks/useMediaQuery";
 
 const MAX_SHAPES = 8;
 
@@ -54,6 +55,7 @@ export function LiquidGlass({
   shapes: GlassShape[];
   params: GlassParams;
 }) {
+  const isMobile = useIsMobile();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // 让 RAF 每帧读最新形状 / 参数
   const shapesRef = useRef(shapes);
@@ -68,7 +70,10 @@ export function LiquidGlass({
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // 移动端降低 DPR 减少 GPU 填充率压力
+    const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1 : 2);
+    // 移动端只渲染 3 个光球，桌面端 5 个
+    const activeLightCount = isMobile ? 3 : MAX_LIGHTS;
     let width = window.innerWidth;
     let height = window.innerHeight;
     canvas.width = width * dpr;
@@ -137,8 +142,13 @@ export function LiquidGlass({
     reducedMotionMQ.addEventListener("change", onReduceMotionChange);
 
     let raf: number | null = null;
+    let frameCount = 0;
     const render = () => {
       raf = requestAnimationFrame(render);
+
+      // 移动端跳帧：隔帧渲染，降低 GPU 负载
+      frameCount++;
+      if (isMobile && frameCount % 2 !== 0) return;
 
       const cw = canvas.width;
       const ch = canvas.height;
@@ -163,7 +173,7 @@ export function LiquidGlass({
       // 光球状态：Lissajous 位置 + 正弦呼吸亮度
       const tSec = (performance.now() - startedAt) / 1000;
       const tAnim = tSec * motionScale; // reduced-motion 时 tAnim≡0，球回到锚点
-      for (let i = 0; i < MAX_LIGHTS; i++) {
+      for (let i = 0; i < activeLightCount; i++) {
         const b = LIGHT_BALLS[i];
         const dx =
           POS_AMP_X *
@@ -188,6 +198,16 @@ export function LiquidGlass({
 
         lightRadiusFlat[i] = b.radius;
       }
+      // 未使用的光球槽位清零（避免 GPU 读到脏数据）
+      for (let i = activeLightCount; i < MAX_LIGHTS; i++) {
+        lightPosFlat[i * 2] = 0;
+        lightPosFlat[i * 2 + 1] = 0;
+        lightIntensityFlat[i] = 0;
+        lightColorFlat[i * 3] = 0;
+        lightColorFlat[i * 3 + 1] = 0;
+        lightColorFlat[i * 3 + 2] = 0;
+        lightRadiusFlat[i] = 0;
+      }
 
       // 高斯核缓存（blurRadius 变化时才重算）
       if (p.blurRadius !== cachedBlurRadius) {
@@ -199,7 +219,7 @@ export function LiquidGlass({
         u_resolution: [cw, ch],
         u_dpr: dpr,
         u_blurWeights: cachedBlurWeights,
-        u_blurRadius: p.blurRadius,
+        u_blurRadius: isMobile ? Math.min(p.blurRadius, 6) : p.blurRadius,
         u_mouse: [mouseGlX, mouseGlY],
         u_shapeRoundness: p.shapeRoundness,
         u_shapeCount: count,
@@ -208,7 +228,7 @@ export function LiquidGlass({
         u_shapeRadii: radiiFlat,
         u_time: (performance.now() - startedAt) / 1000,
         u_motionScale: motionScale,
-        u_lightCount: MAX_LIGHTS,
+        u_lightCount: activeLightCount,
         u_lightPositions: lightPosFlat,
         u_lightIntensities: lightIntensityFlat,
         u_lightColors: lightColorFlat,
