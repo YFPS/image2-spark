@@ -44,6 +44,37 @@
   }
 }
 
+/* Mobile touch optimization */
+@media (max-width: 768px) {
+  body {
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  
+  /* Disable double-tap zoom */
+  * {
+    touch-action: manipulation;
+  }
+  
+  /* Allow selection for specific elements */
+  input, textarea, [contenteditable] {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+}
+
+/* Mobile safe areas */
+@supports (padding: max(0px)) {
+  .safe-area-bottom {
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+  .safe-area-top {
+    padding-top: max(12px, env(safe-area-inset-top));
+  }
+}
+
 /* ─── Cursor 风格的"思考中"动画 ─── */
 
 /* 1) 气泡底色用渐变 shimmer 缓慢扫过 */
