@@ -37,6 +37,45 @@ class GeneratedImageCacheTests(unittest.IsolatedAsyncioTestCase):
             saved = Path(tmp) / urls[0].rsplit("/", 1)[-1]
             self.assertEqual(saved.read_bytes(), png_bytes)
 
+    async def test_asset_index_path_returns_public_urls(self) -> None:
+        class FakeSession:
+            committed = False
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def commit(self):
+                self.committed = True
+
+        session = FakeSession()
+
+        def factory():
+            return session
+
+        async def fake_persist(db, **kwargs):
+            self.assertIs(db, session)
+            self.assertEqual(kwargs["user_id"], 7)
+            self.assertEqual(kwargs["conversation_id"], 8)
+            self.assertEqual(kwargs["message_id"], 123)
+            self.assertEqual(kwargs["urls"], ["data:image/png;base64,aGVsbG8="])
+            return ["/api/images/local/123-0.png"]
+
+        with patch("app.routers.images.persist_generated_assets", side_effect=fake_persist):
+            urls = await images._persist_generated_assets_for_message(
+                factory,
+                ["data:image/png;base64,aGVsbG8="],
+                output_format="png",
+                ai_msg_id=123,
+                conv_id=8,
+                user_id=7,
+            )
+
+        self.assertTrue(session.committed)
+        self.assertEqual(urls, ["/api/images/local/123-0.png"])
+
 
 if __name__ == "__main__":
     unittest.main()

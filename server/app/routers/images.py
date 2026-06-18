@@ -41,6 +41,7 @@ from ..db import get_db, get_session_factory
 from ..deps import get_current_user
 from ..audit_service import InsufficientCreditsError, apply_credit_delta
 from ..email_verification_service import require_verified_user
+from ..generated_assets_service import persist_generated_assets
 from ..models import Conversation, Message, User
 from ..openai_client import (
     UpstreamError,
@@ -366,6 +367,37 @@ async def _persist_generated_images(
     return list(await asyncio.gather(*(persist_one(idx, src) for idx, src in enumerate(urls))))
 
 
+async def _persist_generated_assets_for_message(
+    factory,
+    urls: list[str],
+    *,
+    output_format: str,
+    ai_msg_id: int,
+    conv_id: int,
+    user_id: int,
+) -> list[str]:
+    """写入生成图片资产索引，失败时回退旧本地缓存路径，避免阻断出图。"""
+    try:
+        async with factory() as asset_db:
+            public_urls = await persist_generated_assets(
+                asset_db,
+                user_id=user_id,
+                conversation_id=conv_id,
+                message_id=ai_msg_id,
+                urls=urls,
+                output_format=output_format,
+            )
+            await asset_db.commit()
+            return public_urls
+    except Exception:  # noqa: BLE001
+        logger.warning("生成图片资产索引写入失败 ai_msg_id=%s，回退本地缓存", ai_msg_id, exc_info=True)
+        return await _persist_generated_images(
+            urls,
+            output_format=output_format,
+            ai_msg_id=ai_msg_id,
+        )
+
+
 async def _update_upstream_stats(
     factory,
     *,
@@ -481,10 +513,13 @@ async def _run_generate_task(
     text = f"{action_label} {returned} 张 · {usage['total_tokens']} tokens"
     if missing > 0:
         text += f"（请求 {requested} 张，已退 {missing} 积分）"
-    urls = await _persist_generated_images(
+    urls = await _persist_generated_assets_for_message(
+        factory,
         urls,
         output_format=output_format,
         ai_msg_id=ai_msg_id,
+        conv_id=conv_id,
+        user_id=user_id,
     )
 
     params = {
@@ -634,10 +669,13 @@ async def _run_edit_task(
         text += f"（已忽略 {dropped_refs} 张副参考图，当前上游仅支持单图）"
     if force_backup:
         text += "（多图模式，已自动切换备用上游）"
-    urls = await _persist_generated_images(
+    urls = await _persist_generated_assets_for_message(
+        factory,
         urls,
         output_format=output_format,
         ai_msg_id=ai_msg_id,
+        conv_id=conv_id,
+        user_id=user_id,
     )
 
     params = {
