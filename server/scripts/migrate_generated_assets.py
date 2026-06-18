@@ -15,6 +15,7 @@ from typing import Any
 
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 SERVER_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVER_ROOT) not in sys.path:
@@ -118,6 +119,7 @@ async def fetch_batch(
     return (
         await db.execute(
             select(Message)
+            .options(selectinload(Message.conversation))
             .where(and_(*where))
             .order_by(Message.id.asc())
             .limit(batch_size)
