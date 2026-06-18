@@ -1,4 +1,4 @@
-import { forwardRef } from "react";
+import { forwardRef, useState } from "react";
 
 import { useAuth } from "../auth/AuthContext";
 import { safeImageSrc, type RecentWorkItem } from "../api/gptImage";
@@ -39,30 +39,7 @@ export const RecentWorksCard = forwardRef<HTMLDivElement, Props>(
             </span>
           ) : (
             items.map((it) => (
-              <button
-                key={it.message_id}
-                type="button"
-                onClick={() => onPreview(safeImageSrc(it.image_url))}
-                className="group relative aspect-[3/2] overflow-hidden rounded-[14px] border border-white/[0.05] bg-[#111114] transition-shadow hover:ring-1 hover:ring-white/10 sm:h-[84px] sm:w-[120px] sm:shrink-0"
-              >
-                <img
-                  src={safeImageSrc(it.image_url)}
-                  alt=""
-                  loading="lazy"
-                  className="h-full w-full object-cover"
-                  onError={(e) => {
-                    (e.currentTarget as HTMLImageElement).style.visibility = "hidden";
-                  }}
-                />
-                <span className="absolute left-1.5 top-1.5 rounded-full bg-black/55 px-1.5 py-0.5 text-[10px] text-white/82 sm:left-2 sm:top-2 sm:px-2">
-                  {formatRelativeTime(it.created_at)}
-                </span>
-                {it.image_count > 1 && (
-                  <span className="absolute bottom-1 right-1 rounded-full bg-black/55 px-1.5 py-0.5 text-[10px] text-white/82 sm:bottom-1.5 sm:right-1.5">
-                    +{it.image_count - 1}
-                  </span>
-                )}
-              </button>
+              <RecentWorkThumb key={it.message_id} item={it} onPreview={onPreview} />
             ))
           )}
         </div>
@@ -70,3 +47,50 @@ export const RecentWorksCard = forwardRef<HTMLDivElement, Props>(
     );
   },
 );
+
+function RecentWorkThumb({
+  item,
+  onPreview,
+}: {
+  item: RecentWorkItem;
+  onPreview: (src: string) => void;
+}) {
+  const [failed, setFailed] = useState(false);
+  const src = safeImageSrc(item.image_url);
+
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (!failed) onPreview(src);
+      }}
+      aria-disabled={failed}
+      className="group relative aspect-[3/2] overflow-hidden rounded-[14px] border border-white/[0.05] bg-[#111114] transition-shadow hover:ring-1 hover:ring-white/10 sm:h-[84px] sm:w-[120px] sm:shrink-0"
+    >
+      {failed ? (
+        <div className="grid h-full w-full place-items-center bg-[#151519] px-2 text-center">
+          <span className="text-[10px] leading-tight text-white/42" aria-label="图片加载失败">
+            图片加载失败
+          </span>
+        </div>
+      ) : (
+        <img
+          src={src}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          className="h-full w-full object-cover"
+          onError={() => setFailed(true)}
+        />
+      )}
+      <span className="absolute left-1.5 top-1.5 rounded-full bg-black/55 px-1.5 py-0.5 text-[10px] text-white/82 sm:left-2 sm:top-2 sm:px-2">
+        {formatRelativeTime(item.created_at)}
+      </span>
+      {item.image_count > 1 && (
+        <span className="absolute bottom-1 right-1 rounded-full bg-black/55 px-1.5 py-0.5 text-[10px] text-white/82 sm:bottom-1.5 sm:right-1.5">
+          +{item.image_count - 1}
+        </span>
+      )}
+    </button>
+  );
+}

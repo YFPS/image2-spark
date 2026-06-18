@@ -31,3 +31,6 @@ email-validator>=2.0
 
 # 限流：slowapi 是 starlette 友好的 RateLimiter，支持装饰器 + Redis backend
 slowapi>=0.1.9
+
+# api_key 加密存储（Fernet 对称加密）
+cryptography>=42.0

@@ -79,6 +79,24 @@ class Settings:
         self.proxy_image_host_allowlist: tuple[str, ...] = tuple(
             h.strip().lower() for h in raw_allow.split(",") if h.strip()
         )
+        # 图片代理只服务 UI 预览，源站慢时要快速失败，避免拖住页面其它接口观感
+        self.proxy_image_timeout: float = float(os.getenv("PROXY_IMAGE_TIMEOUT", "6"))
+        default_generated_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "uploads",
+            "generated",
+        )
+        self.generated_image_dir: str = (
+            os.getenv("GENERATED_IMAGE_DIR", "").strip() or default_generated_dir
+        )
+        self.generated_image_cache_timeout: float = float(
+            os.getenv("GENERATED_IMAGE_CACHE_TIMEOUT", "15")
+        )
+        # 历史出图源如果已经下线，不再返回给前端尝试加载，避免页面反复显示坏图。
+        raw_dead_hosts = os.getenv("BROKEN_IMAGE_HOSTS", "67.21.86.146:3015").strip()
+        self.broken_image_hosts: tuple[str, ...] = tuple(
+            h.strip().lower() for h in raw_dead_hosts.split(",") if h.strip()
+        )
 
         # ===== P1 安全加固：全局与端点级限流 =====
         # 全局：按 IP 每分钟最多 N 次，挡爬虫与脚本扫

@@ -16,6 +16,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 os.environ["EMAIL_PROVIDER"] = "null"
+os.environ["RATE_LIMIT_REGISTER"] = "1000/minute"
+os.environ["RATE_LIMIT_VERIFY_EMAIL"] = "1000/minute"
+os.environ["RATE_LIMIT_RESEND_VERIFICATION"] = "1000/minute"
 
 _redis_test_url = os.getenv("REDIS_URL_TEST")
 if not _redis_test_url:
@@ -37,6 +40,7 @@ if _DB_OK and _REDIS_OK and _JWT_OK:
     from app.db import get_engine, get_session_factory  # noqa: E402
     from app.main import app  # noqa: E402
     from app.models import (  # noqa: E402
+        AuditLog,
         Conversation,
         CreditTransaction,
         EmailVerificationToken,
@@ -89,7 +93,9 @@ class LogsTests(unittest.IsolatedAsyncioTestCase):
                     await s.execute(
                         delete(CreditTransaction).where(CreditTransaction.user_id.in_(ids))
                     )
+                    await s.execute(delete(AuditLog).where(AuditLog.user_id.in_(ids)))
                     await s.execute(delete(User).where(User.id.in_(ids)))
+                await s.execute(delete(AuditLog).where(AuditLog.email.in_(self.created_emails)))
             await s.commit()
         await self.client.__aexit__(None, None, None)
         await get_engine().dispose()

@@ -23,6 +23,21 @@ class EmailVerificationModelTests(unittest.TestCase):
         self.assertIn("expires_at", EmailVerificationToken.__table__.columns)
         self.assertIn("used_at", EmailVerificationToken.__table__.columns)
 
+    def test_audit_log_model_has_security_columns(self):
+        from app.models import AuditLog
+
+        self.assertEqual(AuditLog.__tablename__, "audit_logs")
+        for name in [
+            "event_type",
+            "user_id",
+            "email",
+            "ip",
+            "user_agent",
+            "detail",
+            "created_at",
+        ]:
+            self.assertIn(name, AuditLog.__table__.columns)
+
 
 class EmailProviderTests(unittest.TestCase):
     """provider 工厂与 console/null 实现的最小验证。"""
@@ -124,6 +139,47 @@ class EmailVerificationPureFunctionTests(unittest.TestCase):
 
         # 不抛即视为通过
         require_verified_user(_U())  # type: ignore[arg-type]
+
+
+class ClientIpTests(unittest.TestCase):
+    def test_client_ip_prefers_first_forwarded_for_hop(self):
+        from app.audit_service import get_client_ip
+
+        class _Req:
+            headers = {"x-forwarded-for": "203.0.113.9, 10.0.0.8"}
+            client = None
+
+        self.assertEqual(get_client_ip(_Req()), "203.0.113.9")
+
+    def test_client_ip_falls_back_to_x_real_ip_then_client(self):
+        from app.audit_service import get_client_ip
+
+        class _Req:
+            headers = {"x-real-ip": "198.51.100.7"}
+            client = None
+
+        self.assertEqual(get_client_ip(_Req()), "198.51.100.7")
+
+    def test_access_log_user_id_can_be_extracted_from_bearer_token(self):
+        from app.auth_service import create_jwt
+        from app.middleware.access_log import _extract_user_id
+
+        token, _exp, _jti = create_jwt(user_id=42, email="u@example.com", role="user")
+
+        class _Req:
+            state = object()
+            headers = {"authorization": f"Bearer {token}"}
+
+        self.assertEqual(_extract_user_id(_Req()), 42)
+
+
+class AuthRouteSecurityTests(unittest.TestCase):
+    def test_public_auth_mutation_routes_are_rate_limited(self):
+        from app.routers import auth
+
+        self.assertTrue(hasattr(auth.register, "__wrapped__"))
+        self.assertTrue(hasattr(auth.verify_email, "__wrapped__"))
+        self.assertTrue(hasattr(auth.resend_verification_email, "__wrapped__"))
 
 
 if __name__ == "__main__":

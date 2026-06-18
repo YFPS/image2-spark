@@ -1,7 +1,7 @@
 """FastAPI 鉴权依赖"""
 from __future__ import annotations
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from redis.asyncio import Redis
 from sqlalchemy import select
@@ -33,6 +33,7 @@ def _forbidden(code: str) -> HTTPException:
 
 
 async def get_current_user(
+    request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
@@ -62,6 +63,8 @@ async def get_current_user(
         raise _unauthorized()
     if user.disabled:
         raise _forbidden("account_disabled")
+    # 将 user_id 写入 request.state，供 AccessLogMiddleware 读取
+    request.state.user_id = user.id
     return user
 
 

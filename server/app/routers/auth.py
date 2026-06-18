@@ -1,5 +1,4 @@
 """/api/auth/* 路由"""
-from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
@@ -20,6 +19,8 @@ from ..auth_service import (
     normalize_email,
     register_user,
 )
+from ..audit_service import write_audit_log
+from ..config import get_settings
 from ..db import get_db
 from ..deps import get_current_user
 from ..email_verification_service import (
@@ -31,6 +32,7 @@ from ..email_verification_service import (
 )
 from ..models import User
 from ..redis_client import get_redis
+from ..rate_limit import get_limiter
 from ..schemas import (
     LoginRequest,
     RegisterRequest,
@@ -43,6 +45,7 @@ from ..schemas import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 _bearer = HTTPBearer(auto_error=False)
+limiter = get_limiter()
 
 
 def _user_public(u: User) -> UserPublic:
@@ -70,7 +73,9 @@ def _auth_error_response(err: AuthError) -> JSONResponse:
     status_code=status.HTTP_201_CREATED,
     response_model=TokenResponse,
 )
+@limiter.limit(lambda: get_settings().rate_limit_register)
 async def register(
+    request: Request,
     req: RegisterRequest,
     db: AsyncSession = Depends(get_db),
 ):
@@ -86,6 +91,17 @@ async def register(
         await db.commit()
         await db.refresh(user)
     except AuthError as e:
+        try:
+            await write_audit_log(
+                db,
+                event_type="auth_register_failed",
+                request=request,
+                email=normalize_email(req.email),
+                detail={"code": e.code},
+            )
+            await db.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception("写入注册失败审计日志失败")
         return _auth_error_response(e)
 
     verification_email_sent = True
@@ -95,6 +111,19 @@ async def register(
         # provider 故障不影响注册成功；前端可走重发入口
         logger.exception("发送验证邮件失败 user_id=%s", user.id)
         verification_email_sent = False
+
+    try:
+        await write_audit_log(
+            db,
+            event_type="auth_register_success",
+            request=request,
+            user_id=user.id,
+            email=user.email,
+            detail={"verification_email_sent": verification_email_sent},
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("写入注册成功审计日志失败 user_id=%s", user.id)
 
     jwt_token, exp_in, _jti = create_jwt(
         user_id=user.id, email=user.email, role=user.role
@@ -112,13 +141,15 @@ async def register(
 
 
 @router.post("/verify-email")
+@limiter.limit(lambda: get_settings().rate_limit_verify_email)
 async def verify_email(
+    request: Request,
     req: VerifyEmailRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """消费验证 token：把 user 置为已验证并按需发放 signup bonus。"""
     try:
-        user = await verify_email_token(db, req.token)
+        user = await verify_email_token(db, req.token, request=request)
     except VerificationError as e:
         return JSONResponse(
             status_code=e.http_status,
@@ -128,13 +159,23 @@ async def verify_email(
 
 
 @router.post("/resend-verification")
+@limiter.limit(lambda: get_settings().rate_limit_resend_verification)
 async def resend_verification_email(
+    request: Request,
     req: ResendVerificationRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """重发验证邮件。对外固定 ok，避免邮箱存在性枚举。"""
     try:
-        await resend_verification(db, normalize_email(req.email))
+        sent = await resend_verification(db, normalize_email(req.email))
+        await write_audit_log(
+            db,
+            event_type="auth_verification_resend_requested",
+            request=request,
+            email=normalize_email(req.email),
+            detail={"sent": sent},
+        )
+        await db.commit()
     except Exception:  # noqa: BLE001
         # 任何内部错误都吞掉；防止泄露邮箱状态。日志侧仍记录便于排查。
         logger.exception("重发验证邮件失败")

@@ -17,7 +17,8 @@ from .config import get_settings
 from .db import get_engine
 from .rate_limit import get_limiter
 from .redis_client import get_redis
-from .routers import auth, conversations, images, logs, recent_works, works
+from .middleware.access_log import AccessLogMiddleware
+from .routers import admin, auth, conversations, images, logs, recent_works, works
 
 logger = logging.getLogger("image2")
 
@@ -53,6 +54,76 @@ async def lifespan(app: FastAPI):
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))
     logger.info("DB 探活 OK")
+
+    # 启动时确保默认上游渠道存在（从环境变量自动创建）
+    try:
+        from .db import get_session_factory as _gsf
+        from .models import UpstreamChannel as _UC
+        from sqlalchemy import select as _sel
+
+        _settings = get_settings()
+        _factory = _gsf()
+        async with _factory() as _db:
+            _existing = (await _db.execute(
+                _sel(_UC).where(_UC.base_url == _settings.openai_base_url).limit(1)
+            )).scalar_one_or_none()
+            if _existing is None and _settings.openai_api_key:
+                _db.add(_UC(
+                    name="默认上游",
+                    base_url=_settings.openai_base_url,
+                    api_key=_settings.openai_api_key,
+                    enabled=True,
+                    priority=100,
+                    supports_edit=True,
+                    max_concurrent=10,
+                    timeout_seconds=int(_settings.openai_timeout),
+                ))
+                await _db.commit()
+                logger.info("已自动创建默认上游渠道: %s", _settings.openai_base_url)
+            # 备用上游渠道
+            if _existing is None and _settings.openai_base_url_backup and _settings.openai_api_key_backup:
+                _backup = (await _db.execute(
+                    _sel(_UC).where(_UC.base_url == _settings.openai_base_url_backup).limit(1)
+                )).scalar_one_or_none()
+                if _backup is None:
+                    _db.add(_UC(
+                        name="备用上游",
+                        base_url=_settings.openai_base_url_backup,
+                        api_key=_settings.openai_api_key_backup,
+                        enabled=True,
+                        priority=50,
+                        supports_edit=True,
+                        max_concurrent=10,
+                        timeout_seconds=int(_settings.openai_timeout),
+                    ))
+                    await _db.commit()
+                    logger.info("已自动创建备用上游渠道: %s", _settings.openai_base_url_backup)
+    except Exception:
+        logger.warning("自动创建默认上游渠道跳过", exc_info=True)
+
+    # 启动时自动加密存量明文 api_key（一次性迁移）
+    try:
+        from .crypto import encrypt_api_key as _enc_key, is_encrypted as _is_enc, is_encryption_configured as _enc_ok
+        from .db import get_session_factory
+        from .models import UpstreamChannel
+        from sqlalchemy import select
+
+        if _enc_ok():
+            _factory = get_session_factory()
+            async with _factory() as _db:
+                _rows = (await _db.execute(
+                    select(UpstreamChannel).where(UpstreamChannel.api_key.isnot(None))
+                )).scalars().all()
+                _migrated = 0
+                for _ch in _rows:
+                    if not _is_enc(_ch.api_key):
+                        _ch.api_key = _enc_key(_ch.api_key)
+                        _migrated += 1
+                if _migrated > 0:
+                    await _db.commit()
+                    logger.info("已自动加密 %d 条明文 api_key", _migrated)
+    except Exception:
+        logger.warning("api_key 加密迁移跳过（API_KEY_ENCRYPTION_KEY 未配置或异常）")
 
     # Redis 探活
     redis = get_redis()
@@ -129,12 +200,15 @@ async def _validation_handler(request: Request, exc: RequestValidationError):
     )
 
 
+app.add_middleware(AccessLogMiddleware)
+
 app.include_router(images.router)
 app.include_router(auth.router)
 app.include_router(conversations.router)
 app.include_router(recent_works.router)
 app.include_router(works.router)
 app.include_router(logs.router)
+app.include_router(admin.router)
 
 
 @app.get("/api/health")

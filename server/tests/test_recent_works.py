@@ -23,6 +23,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 os.environ["EMAIL_PROVIDER"] = "null"
+os.environ["RATE_LIMIT_REGISTER"] = "1000/minute"
+os.environ["RATE_LIMIT_VERIFY_EMAIL"] = "1000/minute"
+os.environ["RATE_LIMIT_RESEND_VERIFICATION"] = "1000/minute"
 
 _redis_test_url = os.getenv("REDIS_URL_TEST")
 if not _redis_test_url:
@@ -45,6 +48,7 @@ if _DB_OK and _REDIS_OK and _JWT_OK:
     from app.db import get_engine, get_session_factory  # noqa: E402
     from app.main import app  # noqa: E402
     from app.models import (  # noqa: E402
+        AuditLog,
         Conversation,
         CreditTransaction,
         EmailVerificationToken,
@@ -102,7 +106,9 @@ class RecentWorksTests(unittest.IsolatedAsyncioTestCase):
                     await s.execute(
                         delete(CreditTransaction).where(CreditTransaction.user_id.in_(ids))
                     )
+                    await s.execute(delete(AuditLog).where(AuditLog.user_id.in_(ids)))
                     await s.execute(delete(User).where(User.id.in_(ids)))
+                await s.execute(delete(AuditLog).where(AuditLog.email.in_(self.created_emails)))
             await s.commit()
         await self.client.__aexit__(None, None, None)
         await get_engine().dispose()
@@ -198,6 +204,73 @@ class RecentWorksTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["message_id"], good_id)
         self.assertEqual(items[0]["image_url"], "good.png")
+
+    async def test_skips_known_broken_history_image_host(self):
+        """旧图源已确认不可达时，最近作品不再返回必然加载失败的缩略图。"""
+        uid, token = await self._register_and_login()
+        cid = await self._create_conv(uid)
+        await self._add_msg(
+            cid,
+            role="ai",
+            status="done",
+            image_urls=["http://67.21.86.146:3015/images/dead.png"],
+        )
+        good_id = await self._add_msg(
+            cid,
+            role="ai",
+            status="done",
+            image_urls=["/api/images/local/live.png"],
+        )
+
+        r = await self.client.get("/api/me/recent-works", headers=self._auth(token))
+        self.assertEqual(r.status_code, 200, r.text)
+        items = r.json()["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["message_id"], good_id)
+        self.assertEqual(items[0]["image_url"], "/api/images/local/live.png")
+
+    async def test_scans_past_broken_latest_history_images(self):
+        """最新一批历史坏图被过滤后，继续向后找仍可展示的作品。"""
+        uid, token = await self._register_and_login()
+        cid = await self._create_conv(uid)
+        good_id = await self._add_msg(
+            cid,
+            role="ai",
+            status="done",
+            image_urls=["/api/images/local/older-live.png"],
+        )
+        for i in range(15):
+            await self._add_msg(
+                cid,
+                role="ai",
+                status="done",
+                image_urls=[f"http://67.21.86.146:3015/images/dead-{i}.png"],
+            )
+
+        r = await self.client.get("/api/me/recent-works", headers=self._auth(token))
+        self.assertEqual(r.status_code, 200, r.text)
+        items = r.json()["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["message_id"], good_id)
+        self.assertEqual(items[0]["image_url"], "/api/images/local/older-live.png")
+
+    async def test_conversation_detail_replaces_known_broken_images_with_message(self):
+        """会话详情不把坏 URL 交给前端反复尝试加载。"""
+        uid, token = await self._register_and_login()
+        cid = await self._create_conv(uid)
+        mid = await self._add_msg(
+            cid,
+            role="ai",
+            status="done",
+            image_urls=["http://67.21.86.146:3015/images/dead.png"],
+        )
+
+        r = await self.client.get(f"/api/conversations/{cid}", headers=self._auth(token))
+        self.assertEqual(r.status_code, 200, r.text)
+        messages = r.json()["messages"]
+        msg = next(m for m in messages if m["id"] == mid)
+        self.assertIsNone(msg["image_urls"])
+        self.assertEqual(msg["text"], "历史图源已失效，无法预览。")
 
     async def test_ordered_desc(self):
         """5 条按自然顺序生成 → 返回时是 id 倒序（最新优先）"""

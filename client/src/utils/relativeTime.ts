@@ -10,9 +10,15 @@
  * @param iso ISO 时间戳字符串（如 "2026-05-22T10:14:33Z"）
  * @param now 用于测试的"当前时间"，默认 new Date()
  */
+function parseServerTime(iso: string): Date {
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso);
+  return new Date(hasTimezone ? iso : `${iso}Z`);
+}
+
 export function formatRelativeTime(iso: string, now: Date = new Date()): string {
-  const t = new Date(iso);
+  const t = parseServerTime(iso);
   const diffMs = now.getTime() - t.getTime();
+  if (!Number.isFinite(diffMs)) return "";
   const diffMin = Math.floor(diffMs / 60_000);
   if (diffMin < 1) return "刚刚";
   if (diffMin < 60) return `${diffMin} 分钟前`;
@@ -20,12 +26,7 @@ export function formatRelativeTime(iso: string, now: Date = new Date()): string 
   const diffHour = Math.floor(diffMin / 60);
   if (diffHour < 24) return `${diffHour} 小时前`;
 
-  // 昨日按"当地日历日"差判断（不是按 24 小时差）
-  const startOfDay = (d: Date) =>
-    new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  const diffDay = Math.round(
-    (startOfDay(now).getTime() - startOfDay(t).getTime()) / 86_400_000,
-  );
+  const diffDay = Math.floor(diffMs / 86_400_000);
   if (diffDay === 1) return "昨天";
   if (diffDay < 7) return `${diffDay} 天前`;
 

@@ -112,6 +112,8 @@ export function imageToSrc(img: GenerateImage, format = "png"): string | null {
  */
 export function safeImageSrc(src: string): string {
   if (src.startsWith("data:")) return src;
+  if (src.startsWith("blob:")) return src;
+  if (src.startsWith("/")) return src;
   return `/api/images/proxy-image?url=${encodeURIComponent(src)}`;
 }
 

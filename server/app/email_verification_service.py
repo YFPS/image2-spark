@@ -19,9 +19,10 @@ from fastapi import HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .audit_service import apply_credit_delta, write_audit_log
 from .config import get_settings
 from .email_provider import get_email_provider
-from .models import CreditTransaction, EmailVerificationToken, User
+from .models import EmailVerificationToken, User
 
 
 class VerificationError(Exception):
@@ -94,7 +95,7 @@ async def send_verification_email(user: User, token: str) -> None:
 # ===== 验证 =====
 
 
-async def verify_email_token(session: AsyncSession, token: str) -> User:
+async def verify_email_token(session: AsyncSession, token: str, request=None) -> User:
     """消费 token：用户置为已验证，必要时发放 signup bonus。
 
     幂等规则（与 spec 一致）：
@@ -145,15 +146,13 @@ async def verify_email_token(session: AsyncSession, token: str) -> User:
         user.signup_bonus_granted_at = now
         bonus = settings.signup_bonus_credits
         if bonus > 0:
-            user.credits = (user.credits or 0) + bonus
-            session.add(
-                CreditTransaction(
-                    user_id=user.id,
-                    delta=bonus,
-                    balance_after=user.credits,
-                    reason="signup_bonus",
-                    note="邮箱验证后注册赠送",
-                )
+            user, _tx = await apply_credit_delta(
+                session,
+                user_id=user.id,
+                delta=bonus,
+                reason="signup_bonus",
+                note="邮箱验证后注册赠送",
+                request=request,
             )
 
     # 同用户其他未使用 token 一并标 used，避免一份链接验证后另一份仍能复用
@@ -164,6 +163,14 @@ async def verify_email_token(session: AsyncSession, token: str) -> User:
             EmailVerificationToken.used_at.is_(None),
         )
         .values(used_at=now)
+    )
+    await write_audit_log(
+        session,
+        event_type="auth_email_verified",
+        request=request,
+        user_id=user.id,
+        email=user.email,
+        detail={"token_id": token_row.id, "signup_bonus_granted": user.signup_bonus_granted_at == now},
     )
     await session.commit()
     await session.refresh(user)

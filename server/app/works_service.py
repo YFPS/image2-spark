@@ -6,10 +6,36 @@
 """
 from __future__ import annotations
 
-from sqlalchemy import Select, and_, select
+from urllib.parse import urlparse
 
+from sqlalchemy import Select, and_, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from .config import get_settings
 from .models import Conversation, Message
 from .schemas import RecentWorkItem
+
+
+def is_displayable_image_url(url: str) -> bool:
+    """判断图片 URL 是否还应该交给前端展示。"""
+    if not isinstance(url, str) or not url:
+        return False
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return True
+    netloc = parsed.netloc.lower()
+    hostname = (parsed.hostname or "").lower()
+    dead_hosts = get_settings().broken_image_hosts
+    return netloc not in dead_hosts and hostname not in dead_hosts
+
+
+def filter_displayable_image_urls(urls: list[str] | None) -> list[str]:
+    """过滤已知失效的历史图源，不修改数据库原始记录。"""
+    return [url for url in (urls or []) if is_displayable_image_url(url)]
+
+
+CONVERSATION_SCAN_BATCH = 50
+MESSAGE_SCAN_LIMIT_MIN = 96
 
 
 def build_works_query(user_id: int, *, cursor: int | None = None, limit: int = 12) -> Select:
@@ -51,7 +77,7 @@ def message_to_recent_work_item(m: Message) -> RecentWorkItem | None:
     若 image_urls 为空列表（DB 层 IS NOT NULL 兜不住 "[]" 这种 JSON 空列表），
     返回 None 让调用方跳过——双保险。
     """
-    urls = m.image_urls or []
+    urls = filter_displayable_image_urls(m.image_urls)
     if not urls:
         return None
     size: str | None = None
@@ -68,3 +94,83 @@ def message_to_recent_work_item(m: Message) -> RecentWorkItem | None:
         size=size,
         created_at=m.created_at,
     )
+
+
+async def fetch_recent_work_items(
+    db: AsyncSession,
+    user_id: int,
+    *,
+    cursor: int | None = None,
+    limit: int = 12,
+) -> tuple[list[RecentWorkItem], int | None]:
+    """按用户查询可展示作品，避免 MySQL 对跨表结果做全局 filesort。
+
+    线上 RDS 在 `messages JOIN conversations ORDER BY messages.id DESC LIMIT N`
+    上会触发 1038 sort buffer 错误。这里先用 conversations 的用户索引分批取
+    会话，再按单个 conversation_id 走 `idx_msg_conv_id` 倒序扫描消息，最后在
+    Python 合并少量候选项。
+    """
+    target = limit + 1
+    candidates: list[RecentWorkItem] = []
+    conv_cursor: tuple[object, int] | None = None
+    message_scan_limit = max(MESSAGE_SCAN_LIMIT_MIN, target * 8)
+
+    while len(candidates) < target:
+        conv_where = [
+            Conversation.user_id == user_id,
+            Conversation.deleted_at.is_(None),
+        ]
+        if conv_cursor is not None:
+            last_updated, last_id = conv_cursor
+            conv_where.append(
+                or_(
+                    Conversation.updated_at < last_updated,
+                    and_(
+                        Conversation.updated_at == last_updated,
+                        Conversation.id < last_id,
+                    ),
+                )
+            )
+
+        conv_rows = (
+            await db.execute(
+                select(Conversation.id, Conversation.updated_at)
+                .where(and_(*conv_where))
+                .order_by(Conversation.updated_at.desc(), Conversation.id.desc())
+                .limit(CONVERSATION_SCAN_BATCH)
+            )
+        ).all()
+        if not conv_rows:
+            break
+
+        for conv_id, _updated_at in conv_rows:
+            msg_where = [
+                Message.conversation_id == conv_id,
+                Message.role == "ai",
+                Message.status == "done",
+                Message.image_urls.is_not(None),
+            ]
+            if cursor is not None:
+                msg_where.append(Message.id < cursor)
+
+            messages = (
+                await db.execute(
+                    select(Message)
+                    .where(and_(*msg_where))
+                    .order_by(Message.id.desc())
+                    .limit(message_scan_limit)
+                )
+            ).scalars().all()
+
+            for message in messages:
+                item = message_to_recent_work_item(message)
+                if item is not None:
+                    candidates.append(item)
+
+        candidates.sort(key=lambda item: item.message_id, reverse=True)
+        candidates = candidates[:target]
+        conv_cursor = (conv_rows[-1].updated_at, conv_rows[-1].id)
+
+    page_items = candidates[:limit]
+    next_cursor = page_items[-1].message_id if len(candidates) > limit and page_items else None
+    return page_items, next_cursor

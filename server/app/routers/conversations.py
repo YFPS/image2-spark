@@ -23,6 +23,7 @@ from ..schemas import (
     MessageCreateIn,
     MessageOut,
 )
+from ..works_service import filter_displayable_image_urls
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
@@ -44,11 +45,15 @@ def _bad_request(code: str, message: str) -> HTTPException:
 
 
 def _to_msg_out(m: Message) -> MessageOut:
+    image_urls = filter_displayable_image_urls(m.image_urls)
+    text = m.text
+    if m.image_urls and not image_urls and not text.strip():
+        text = "历史图源已失效，无法预览。"
     return MessageOut(
         id=m.id,
         role=m.role,
-        text=m.text,
-        image_urls=m.image_urls,
+        text=text,
+        image_urls=image_urls or None,
         params=m.params,
         status=getattr(m, "status", "done"),
         created_at=m.created_at,

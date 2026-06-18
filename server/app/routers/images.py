@@ -18,23 +18,30 @@ Python 3.13 已原生支持 list[X] / X | Y 语法，不需要 future。
 """
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
+import mimetypes
+import re
+import secrets
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from sqlalchemy import and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
 from ..db import get_db, get_session_factory
 from ..deps import get_current_user
+from ..audit_service import InsufficientCreditsError, apply_credit_delta
 from ..email_verification_service import require_verified_user
-from ..models import Conversation, CreditTransaction, Message, User
+from ..models import Conversation, Message, User
 from ..openai_client import (
     UpstreamError,
     UpstreamTimeout,
@@ -94,22 +101,27 @@ async def _charge_credits(
     cost: int,
     ai_msg_id: int,
     reason: str,
+    request: Request | None = None,
 ) -> None:
-    """请求层预扣：从 user.credits 减 cost、写 CreditTransaction 流水。
-    调用前必须已 check user.credits >= cost；db.commit 由调用方负责。
+    """原子预扣：UPDATE ... WHERE credits >= cost，行数为 0 则余额不足。
+
+    用 SQL 原子操作替代 Python 层读-改-写，彻底消除并发竞态：
+    多个请求同时扣费时，数据库串行执行 UPDATE，每个请求看到的都是上一个请求提交后的最新余额。
     """
-    user.credits = (user.credits or 0) - cost
-    db.add(
-        CreditTransaction(
+    try:
+        await apply_credit_delta(
+            db,
             user_id=user.id,
             delta=-cost,
-            balance_after=user.credits,
             reason=reason,
             ref_type="message",
             ref_id=str(ai_msg_id),
             note=f"{reason} {cost} 张",
+            request=request,
         )
-    )
+    except InsufficientCreditsError as e:
+        raise _insufficient_credits(current=e.current, need=e.need) from e
+    await db.refresh(user)
 
 
 async def _refund_credits(
@@ -119,26 +131,17 @@ async def _refund_credits(
     cost: int,
     fail_reason: str,
 ) -> None:
-    """后台任务失败时退款：加回 user.credits + 写 reason='refund' 流水。独立 session。"""
+    """后台任务失败时退款：原子加回 user.credits + 写 reason='refund' 流水。独立 session。"""
     async with factory() as db:
         try:
-            row = (
-                await db.execute(select(User).where(User.id == user_id))
-            ).scalar_one_or_none()
-            if row is None:
-                logger.error("refund 找不到 user_id=%s ai_msg_id=%s", user_id, ai_msg_id)
-                return
-            row.credits = (row.credits or 0) + cost
-            db.add(
-                CreditTransaction(
-                    user_id=user_id,
-                    delta=cost,
-                    balance_after=row.credits,
-                    reason="refund",
-                    ref_type="message",
-                    ref_id=str(ai_msg_id),
-                    note=f"生图失败退款：{fail_reason}",
-                )
+            await apply_credit_delta(
+                db,
+                user_id=user_id,
+                delta=cost,
+                reason="refund",
+                ref_type="message",
+                ref_id=str(ai_msg_id),
+                note=f"生图失败退款：{fail_reason}",
             )
             await db.commit()
         except Exception:  # noqa: BLE001
@@ -261,6 +264,156 @@ def _parse_upstream_images(
     return urls, usage, len(data_list)
 
 
+_DATA_IMAGE_RE = re.compile(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.*)$", re.DOTALL)
+_IMAGE_EXT_BY_CT = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+
+
+def _image_ext(content_type: str, output_format: str) -> str:
+    ct = content_type.split(";", 1)[0].strip().lower()
+    if ct in _IMAGE_EXT_BY_CT:
+        return _IMAGE_EXT_BY_CT[ct]
+    fallback = (output_format or "png").strip().lower().lstrip(".")
+    if fallback == "jpeg":
+        fallback = "jpg"
+    if not re.fullmatch(r"[a-z0-9]+", fallback):
+        fallback = "png"
+    return f".{fallback}"
+
+
+async def _write_generated_image(
+    root: Path,
+    *,
+    ai_msg_id: int,
+    index: int,
+    content_type: str,
+    output_format: str,
+    body: bytes,
+) -> str:
+    max_bytes = 50 * 1024 * 1024
+    if len(body) > max_bytes:
+        raise ValueError("生成图片超过 50 MB")
+    root.mkdir(parents=True, exist_ok=True)
+    ext = _image_ext(content_type, output_format)
+    filename = f"{ai_msg_id}-{index}-{secrets.token_hex(8)}{ext}"
+    path = (root / filename).resolve()
+    if root not in path.parents:
+        raise ValueError("生成图片路径越界")
+    await asyncio.to_thread(path.write_bytes, body)
+    return f"/api/images/local/{filename}"
+
+
+async def _download_generated_image(src: str, output_format: str) -> tuple[bytes, str]:
+    settings = get_settings()
+    timeout = httpx.Timeout(
+        settings.generated_image_cache_timeout,
+        connect=min(5.0, settings.generated_image_cache_timeout),
+    )
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        resp = await client.get(src)
+        resp.raise_for_status()
+        ct = resp.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if not ct.startswith("image/"):
+            raise ValueError(f"非图片 Content-Type：{ct}")
+        body = resp.content
+    return body, ct or f"image/{output_format or 'png'}"
+
+
+async def _persist_generated_images(
+    urls: list[str],
+    *,
+    output_format: str,
+    ai_msg_id: int,
+) -> list[str]:
+    """把上游返回的短期图源保存到本地，保存失败时保留原 URL。"""
+    settings = get_settings()
+    root = Path(settings.generated_image_dir).resolve()
+
+    async def persist_one(idx: int, src: str) -> str:
+        try:
+            if src.startswith("data:"):
+                match = _DATA_IMAGE_RE.match(src)
+                if not match:
+                    raise ValueError("无法识别 data:image")
+                content_type, b64 = match.groups()
+                try:
+                    body = base64.b64decode(b64, validate=True)
+                except binascii.Error as e:
+                    raise ValueError("data:image base64 无效") from e
+            else:
+                parsed = urlparse(src)
+                if parsed.scheme not in ("http", "https"):
+                    return src
+                body, content_type = await _download_generated_image(src, output_format)
+
+            return await _write_generated_image(
+                root,
+                ai_msg_id=ai_msg_id,
+                index=idx,
+                content_type=content_type,
+                output_format=output_format,
+                body=body,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("生成图片本地缓存失败 ai_msg_id=%s idx=%s", ai_msg_id, idx, exc_info=True)
+            return src
+
+    return list(await asyncio.gather(*(persist_one(idx, src) for idx, src in enumerate(urls))))
+
+
+async def _update_upstream_stats(
+    factory,
+    *,
+    success: bool,
+) -> None:
+    """后台任务完成后，更新上游渠道的请求/失败计数。
+
+    按 base_url 匹配当前使用的上游渠道；如果数据库中没有对应记录，
+    自动从环境变量创建一条默认渠道，确保监控面板始终有数据。
+    """
+    from ..models import UpstreamChannel
+
+    settings = get_settings()
+    base_url = settings.openai_base_url
+
+    async with factory() as db:
+        try:
+            # 按 base_url 精确匹配
+            ch = (await db.execute(
+                select(UpstreamChannel)
+                .where(UpstreamChannel.base_url == base_url)
+                .limit(1)
+            )).scalar_one_or_none()
+
+            # 找不到则自动创建默认渠道（从环境变量）
+            if ch is None:
+                ch = UpstreamChannel(
+                    name="默认上游",
+                    base_url=base_url,
+                    api_key=settings.openai_api_key,
+                    enabled=True,
+                    priority=100,
+                    supports_edit=True,
+                    max_concurrent=10,
+                    timeout_seconds=int(settings.openai_timeout),
+                )
+                db.add(ch)
+                await db.flush()
+
+            ch.total_requests = (ch.total_requests or 0) + 1
+            if not success:
+                ch.total_failures = (ch.total_failures or 0) + 1
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("更新上游渠道统计失败")
+
+
 # ===== /generate =====
 
 
@@ -281,6 +434,7 @@ async def _run_generate_task(
             factory, ai_msg_id, conv_id, ok=False, text=f"失败：上游超时 ({e})"
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"上游超时 ({e})")
+        await _update_upstream_stats(factory, success=False)
         return
     except UpstreamError as e:
         await _finalize_message(
@@ -288,6 +442,7 @@ async def _run_generate_task(
             text=f"失败：upstream_error：{e}",
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"upstream_error: {e}")
+        await _update_upstream_stats(factory, success=False)
         return
     except Exception as e:  # noqa: BLE001
         logger.exception("generate task 异常 ai_msg_id=%s", ai_msg_id)
@@ -295,10 +450,12 @@ async def _run_generate_task(
             factory, ai_msg_id, conv_id, ok=False, text=f"失败：{e}"
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"task 异常: {e}")
+        await _update_upstream_stats(factory, success=False)
         return
 
+    output_format = str(payload.get("output_format") or "png")
     urls, usage, _n_imgs = _parse_upstream_images(
-        upstream_json, output_format=str(payload.get("output_format") or "png")
+        upstream_json, output_format=output_format
     )
     returned = len(urls)
     requested = int(payload.get("n") or 1)
@@ -310,6 +467,7 @@ async def _run_generate_task(
             text=f"失败：上游未返回任何图片（usage {usage['total_tokens']} tokens）",
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, "上游 data=[] 未返回图片")
+        await _update_upstream_stats(factory, success=False)
         return
 
     # 部分缺图：按缺失张数退款（每张 1 分，与 _calculate_cost 对齐）
@@ -323,6 +481,12 @@ async def _run_generate_task(
     text = f"{action_label} {returned} 张 · {usage['total_tokens']} tokens"
     if missing > 0:
         text += f"（请求 {requested} 张，已退 {missing} 积分）"
+    urls = await _persist_generated_images(
+        urls,
+        output_format=output_format,
+        ai_msg_id=ai_msg_id,
+    )
+
     params = {
         "model": upstream_json.get("model", payload.get("model")),
         "usage": usage,
@@ -333,6 +497,7 @@ async def _run_generate_task(
         factory, ai_msg_id, conv_id, ok=True, text=text,
         image_urls=urls, params=params,
     )
+    await _update_upstream_stats(factory, success=True)
 
 
 @router.post("/generate", response_model=MessageOut)
@@ -380,7 +545,7 @@ async def generate(
     }
     msg = await _create_pending_ai_msg(db, conv.id, init_params)
     await db.flush()  # 拿 msg.id 给 CreditTransaction.ref_id 引用
-    await _charge_credits(db, user, cost, msg.id, reason="generate")
+    await _charge_credits(db, user, cost, msg.id, reason="generate", request=request)
     await db.commit()
     await db.refresh(msg)
 
@@ -418,6 +583,7 @@ async def _run_edit_task(
             factory, ai_msg_id, conv_id, ok=False, text=f"失败：上游超时 ({e})"
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"上游超时 ({e})")
+        await _update_upstream_stats(factory, success=False)
         return
     except UpstreamError as e:
         await _finalize_message(
@@ -425,6 +591,7 @@ async def _run_edit_task(
             text=f"失败：upstream_error：{e}",
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"upstream_error: {e}")
+        await _update_upstream_stats(factory, success=False)
         return
     except Exception as e:  # noqa: BLE001
         logger.exception("edit task 异常 ai_msg_id=%s", ai_msg_id)
@@ -432,10 +599,12 @@ async def _run_edit_task(
             factory, ai_msg_id, conv_id, ok=False, text=f"失败：{e}"
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"task 异常: {e}")
+        await _update_upstream_stats(factory, success=False)
         return
 
+    output_format = str(fields.get("output_format") or "png")
     urls, usage, _n_imgs = _parse_upstream_images(
-        upstream_json, output_format=str(fields.get("output_format") or "png")
+        upstream_json, output_format=output_format
     )
     returned = len(urls)
     requested = int(fields.get("n") or 1)
@@ -447,6 +616,7 @@ async def _run_edit_task(
             text=f"失败：上游未返回任何图片（usage {usage['total_tokens']} tokens）",
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, "上游 data=[] 未返回图片")
+        await _update_upstream_stats(factory, success=False)
         return
 
     # 部分缺图：按缺失张数退款（每张 1 分）
@@ -464,6 +634,12 @@ async def _run_edit_task(
         text += f"（已忽略 {dropped_refs} 张副参考图，当前上游仅支持单图）"
     if force_backup:
         text += "（多图模式，已自动切换备用上游）"
+    urls = await _persist_generated_images(
+        urls,
+        output_format=output_format,
+        ai_msg_id=ai_msg_id,
+    )
+
     params = {
         "mode": "edit",
         "model": upstream_json.get("model", fields.get("model")),
@@ -474,6 +650,7 @@ async def _run_edit_task(
         factory, ai_msg_id, conv_id, ok=True, text=text,
         image_urls=urls, params=params,
     )
+    await _update_upstream_stats(factory, success=True)
 
 
 @router.post("/edit", response_model=MessageOut)
@@ -583,7 +760,7 @@ async def edit(
     }
     msg = await _create_pending_ai_msg(db, conv.id, init_params)
     await db.flush()  # 拿 msg.id
-    await _charge_credits(db, user, cost, msg.id, reason="edit")
+    await _charge_credits(db, user, cost, msg.id, reason="edit", request=request)
     await db.commit()
     await db.refresh(msg)
 
@@ -600,6 +777,39 @@ async def edit(
 
 
 # ===== proxy-image / segment / brush-cutout =====
+
+
+@router.get("/local/{filename}")
+async def local_generated_image(filename: str) -> Response:
+    """读取已本地化的生成图片。"""
+    if "/" in filename or "\\" in filename or filename in {"", ".", ".."}:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "validation_error", "message": "图片文件名无效"}},
+        )
+
+    root = Path(get_settings().generated_image_dir).resolve()
+    path = (root / filename).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "validation_error", "message": "图片路径无效"}},
+        )
+
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    if not path.is_file() or not media_type.startswith("image/"):
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "image_not_found", "message": "图片不存在"}},
+        )
+
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @router.get("/proxy-image")
@@ -663,39 +873,72 @@ async def proxy_image(
     # ② 缓存 miss → 流式下载 + 后台缓存
     max_bytes = 50 * 1024 * 1024
 
-    # 先 HEAD 拿到 Content-Type
+    timeout = httpx.Timeout(settings.proxy_image_timeout, connect=min(3.0, settings.proxy_image_timeout))
+    client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
     try:
-        async with httpx.AsyncClient(timeout=15) as head_client:
-            head_resp = await head_client.head(url)
-            ct = head_resp.headers.get("Content-Type", "")
-            if not ct.startswith("image/"):
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "error": {"code": "validation_error", "message": f"非图片 Content-Type：{ct}"},
-                    },
-                )
-    except httpx.HTTPError:
-        ct = "image/png"  # fallback
+        req = client.build_request("GET", url)
+        up_resp = await client.send(req, stream=True)
+    except httpx.TimeoutException as e:
+        await client.aclose()
+        return JSONResponse(
+            status_code=504,
+            content={"error": {"code": "upstream_timeout", "message": f"拉取图片超时：{e}"}},
+        )
+    except httpx.HTTPError as e:
+        await client.aclose()
+        return JSONResponse(
+            status_code=502,
+            content={"error": {"code": "upstream_error", "message": f"拉取图片失败：{e}"}},
+        )
+
+    if up_resp.status_code >= 400:
+        await up_resp.aclose()
+        await client.aclose()
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": {
+                    "code": "upstream_error",
+                    "message": f"上游图片返回 HTTP {up_resp.status_code}",
+                    "upstream_status": up_resp.status_code,
+                },
+            },
+        )
+
+    ct = up_resp.headers.get("Content-Type", "")
+    if not ct.startswith("image/"):
+        await up_resp.aclose()
+        await client.aclose()
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "validation_error", "message": f"非图片 Content-Type：{ct}"}},
+        )
+
+    content_length = up_resp.headers.get("Content-Length")
+    if content_length and int(content_length) > max_bytes:
+        await up_resp.aclose()
+        await client.aclose()
+        return JSONResponse(
+            status_code=413,
+            content={"error": {"code": "payload_too_large", "message": "图片超过 50 MB"}},
+        )
 
     # 流式转发 + 内存缓冲（供后台写 Redis）
     async def _pipe():
         chunks: list[bytes] = []
         total = 0
         try:
-            async with httpx.AsyncClient(timeout=settings.openai_timeout) as client:
-                async with client.stream("GET", url) as up_resp:
-                    if up_resp.status_code >= 400:
-                        return  # 流中断，让浏览器感知断连
-                    async for chunk in up_resp.aiter_bytes():
-                        total += len(chunk)
-                        if total > max_bytes:
-                            raise HTTPException(status_code=413, detail="图片超过 50 MB")
-                        chunks.append(chunk)
-                        yield chunk
+            async for chunk in up_resp.aiter_bytes():
+                total += len(chunk)
+                if total > max_bytes:
+                    raise HTTPException(status_code=413, detail="图片超过 50 MB")
+                chunks.append(chunk)
+                yield chunk
         except httpx.HTTPError:
             return  # 静默中断
         finally:
+            await up_resp.aclose()
+            await client.aclose()
             # 流结束后后台写 Redis
             if chunks:
                 body = b"".join(chunks)

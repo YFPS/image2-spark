@@ -23,6 +23,9 @@ load_dotenv()  # 读 server/.env
 
 # 集成测试不发真实邮件：用 null provider 记录调用即可
 os.environ["EMAIL_PROVIDER"] = "null"
+os.environ["RATE_LIMIT_REGISTER"] = "1000/minute"
+os.environ["RATE_LIMIT_VERIFY_EMAIL"] = "1000/minute"
+os.environ["RATE_LIMIT_RESEND_VERIFICATION"] = "1000/minute"
 
 # 用专用 Redis DB 15 跑测试，不干扰开发用的 DB 0
 _redis_test_url = os.getenv("REDIS_URL_TEST")
@@ -46,7 +49,7 @@ if _DB_OK and _REDIS_OK and _JWT_OK:
 
     from app.db import get_engine, get_session_factory  # noqa: E402
     from app.main import app  # noqa: E402
-    from app.models import CreditTransaction, EmailVerificationToken, User  # noqa: E402
+    from app.models import AuditLog, CreditTransaction, EmailVerificationToken, User  # noqa: E402
     from app.redis_client import get_redis  # noqa: E402
 
 
@@ -90,8 +93,10 @@ class AuthRoutesIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         delete(EmailVerificationToken).where(EmailVerificationToken.user_id.in_(ids))
                     )
                     await s.execute(delete(CreditTransaction).where(CreditTransaction.user_id.in_(ids)))
+                    await s.execute(delete(AuditLog).where(AuditLog.user_id.in_(ids)))
                     await s.execute(delete(User).where(User.id.in_(ids)))
-                    await s.commit()
+                await s.execute(delete(AuditLog).where(AuditLog.email.in_(self.created_emails)))
+                await s.commit()
         await self.client.__aexit__(None, None, None)
         # 主动释放 engine/redis，避免 loop 关闭时还有挂起连接
         await get_engine().dispose()
@@ -128,6 +133,32 @@ class AuthRoutesIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 )
             )).fetchone()
             self.assertIsNone(row)
+
+    async def test_register_writes_audit_log_with_real_ip(self):
+        email = self._track(_rand_email())
+        r = await self.client.post(
+            "/api/auth/register",
+            headers={
+                "X-Forwarded-For": "203.0.113.9, 10.0.0.8",
+                "User-Agent": "audit-test/1.0",
+            },
+            json={"email": email, "password": "Hunter2_pw"},
+        )
+        self.assertEqual(r.status_code, 201, r.text)
+        uid = r.json()["user"]["id"]
+
+        factory = get_session_factory()
+        async with factory() as s:
+            row = (await s.execute(
+                AuditLog.__table__.select()
+                .where(AuditLog.user_id == uid)
+                .where(AuditLog.event_type == "auth_register_success")
+            )).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row.ip, "203.0.113.9")
+            self.assertEqual(row.user_agent, "audit-test/1.0")
+            self.assertEqual(row.email, email.lower())
+            self.assertEqual(row.detail["verification_email_sent"], True)
 
     async def test_register_duplicate_email_409(self):
         email = self._track(_rand_email())
@@ -313,6 +344,15 @@ class AuthRoutesIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(signup_rows), 1)
             self.assertEqual(signup_rows[0].delta, 5)
             self.assertEqual(signup_rows[0].balance_after, 5)
+            audit = (await s.execute(
+                AuditLog.__table__.select()
+                .where(AuditLog.user_id == uid)
+                .where(AuditLog.event_type == "credit_grant")
+            )).fetchone()
+            self.assertIsNotNone(audit)
+            self.assertEqual(audit.detail["reason"], "signup_bonus")
+            self.assertEqual(audit.detail["delta"], 5)
+            self.assertEqual(audit.detail["balance_after"], 5)
 
     async def test_resend_verification_does_not_reveal_email_state(self):
         """resend 对不存在/已验证/未验证邮箱都返回相同 {ok: true}（防枚举）。"""

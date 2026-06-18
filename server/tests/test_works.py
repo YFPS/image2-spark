@@ -16,6 +16,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 os.environ["EMAIL_PROVIDER"] = "null"
+os.environ["RATE_LIMIT_REGISTER"] = "1000/minute"
+os.environ["RATE_LIMIT_VERIFY_EMAIL"] = "1000/minute"
+os.environ["RATE_LIMIT_RESEND_VERIFICATION"] = "1000/minute"
 
 _redis_test_url = os.getenv("REDIS_URL_TEST")
 if not _redis_test_url:
@@ -37,6 +40,7 @@ if _DB_OK and _REDIS_OK and _JWT_OK:
     from app.db import get_engine, get_session_factory  # noqa: E402
     from app.main import app  # noqa: E402
     from app.models import (  # noqa: E402
+        AuditLog,
         Conversation,
         CreditTransaction,
         EmailVerificationToken,
@@ -92,7 +96,9 @@ class WorksTests(unittest.IsolatedAsyncioTestCase):
                     await s.execute(
                         delete(CreditTransaction).where(CreditTransaction.user_id.in_(ids))
                     )
+                    await s.execute(delete(AuditLog).where(AuditLog.user_id.in_(ids)))
                     await s.execute(delete(User).where(User.id.in_(ids)))
+                await s.execute(delete(AuditLog).where(AuditLog.email.in_(self.created_emails)))
             await s.commit()
         await self.client.__aexit__(None, None, None)
         await get_engine().dispose()
@@ -222,6 +228,36 @@ class WorksTests(unittest.IsolatedAsyncioTestCase):
         urls = [it["image_url"] for it in r.json()["items"]]
         self.assertEqual(len(urls), 5)
         self.assertTrue(all(u.startswith("a-") for u in urls))
+
+    async def test_skips_known_broken_history_image_host(self):
+        uid, token = await self._register_and_login()
+        cid = await self._create_conv(uid)
+        await self._add_msg(cid, image_urls=["http://67.21.86.146:3015/images/dead.png"])
+        good_id = await self._add_msg(cid, image_urls=["/api/images/local/live.png"])
+
+        r = await self.client.get("/api/me/works", headers=self._auth(token))
+        self.assertEqual(r.status_code, 200, r.text)
+        items = r.json()["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["message_id"], good_id)
+        self.assertEqual(items[0]["image_url"], "/api/images/local/live.png")
+
+    async def test_scans_past_broken_latest_history_images(self):
+        uid, token = await self._register_and_login()
+        cid = await self._create_conv(uid)
+        good_id = await self._add_msg(cid, image_urls=["/api/images/local/older-live.png"])
+        for i in range(15):
+            await self._add_msg(
+                cid,
+                image_urls=[f"http://67.21.86.146:3015/images/dead-{i}.png"],
+            )
+
+        r = await self.client.get("/api/me/works", headers=self._auth(token))
+        self.assertEqual(r.status_code, 200, r.text)
+        items = r.json()["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["message_id"], good_id)
+        self.assertEqual(items[0]["image_url"], "/api/images/local/older-live.png")
 
     async def test_excludes_soft_deleted_conv(self):
         uid, token = await self._register_and_login()

@@ -21,6 +21,7 @@ import { LiquidGlass, type GlassShape } from "./LiquidGlass";
 import { RecentWorksCard } from "./components/RecentWorksCard";
 import { GalleryPage } from "./pages/GalleryPage";
 import { LogsPage } from "./pages/LogsPage";
+import { AdminPage } from "./pages/AdminPage";
 import { useRecentWorks } from "./hooks/useRecentWorks";
 import { GlassControls, loadStoredParams, type GlassParams } from "./GlassControls";
 import {
@@ -48,6 +49,7 @@ import { useIsMobile } from "./hooks/useMediaQuery";
 import { MobileCanvas } from "./components/mobile/MobileCanvas";
 import { MobileNodePanel } from "./components/mobile/MobileNodePanel";
 import { MobileDebugPanel } from "./components/mobile/MobileDebugPanel";
+import { shouldShowAiAssistant, type AppNavKey } from "./navigationVisibility";
 
 // 角色 → 侧边栏副标显示
 const ROLE_LABEL: Record<"admin" | "user" | "paid", string> = {
@@ -791,6 +793,8 @@ function SimpleGenerateView({
   const resultsCardRef = useRef<HTMLDivElement | null>(null);
   const recentCardRef = useRef<HTMLDivElement | null>(null);
   const chatPanelRef = useRef<HTMLDivElement | null>(null);
+  const assistantDockRef = useRef<HTMLDivElement | null>(null);
+  const pageShellRef = useRef<HTMLDivElement | null>(null);
   // 聊天消息滚动容器 —— TimelineQuickJump 用它读 scrollTop 算"当前消息"并 scrollTo 跳转
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   // 聊天输入框 ref，供后续 onPaste / handleSetAsEditTarget 等使用
@@ -829,8 +833,11 @@ function SimpleGenerateView({
 
   const [historyOpen, setHistoryOpen] = useState(false);
 
-  const [activeNav, setActiveNav] = useState("studio");
+  const [activeNav, setActiveNav] = useState<AppNavKey>("studio");
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
+  const [shellGlassShapes, setShellGlassShapes] = useState<GlassShape[]>([]);
+  const [pageGlassShapes, setPageGlassShapes] = useState<GlassShape[]>([]);
+  const assistantShouldShow = shouldShowAiAssistant(activeNav);
   // ModelPlaza 内部自管选型；这里只读 selectedModel 用于顶部副标显示
   const [selectedModel] = useState<"gpt-image-2" | "banana-nano-pro">("gpt-image-2");
   const [chatInput, setChatInput] = useState("");
@@ -1180,27 +1187,45 @@ function SimpleGenerateView({
     setTimeout(() => chatInputRef.current?.focus(), 0);
   };
 
-  useLayoutEffect(() => {
-    // 当 activeNav 不是 "studio" 时（models/gallery/logs），由对应页面主导玻璃 shape，
-    // MainCanvas 的 7 张玻璃壳测量跳过；同时清空 shapes，避免上次工作室的影子残留。
-    if (activeNav !== "studio") {
-      onShapesChange([]);
-      return;
+  useEffect(() => {
+    if (activeNav !== "models") {
+      setPageGlassShapes([]);
     }
-    const refs: RefObject<HTMLElement | null>[] = [
-      sidebarRef,
-      referenceCardRef,
-      settingsCardRef,
-      resultsCardRef,
-      recentCardRef,
-      chatPanelRef,
-    ];
+  }, [activeNav]);
+
+  useEffect(() => {
+    if (!assistantShouldShow) {
+      setHistoryOpen(false);
+      setChatDragOver(false);
+    }
+  }, [assistantShouldShow]);
+
+  useEffect(() => {
+    onShapesChange([...shellGlassShapes, ...pageGlassShapes]);
+  }, [onShapesChange, shellGlassShapes, pageGlassShapes]);
+
+  useLayoutEffect(() => {
+    // 页面切换时同步测量当前可见玻璃外壳，避免非工作室页面丢失 LiquidGlass shape。
+    // 模型页额外合并 ModelPlaza 上报的 Hero 与旗舰卡片 shape。
+    const refs: RefObject<HTMLElement | null>[] =
+      activeNav === "studio"
+        ? [
+            sidebarRef,
+            referenceCardRef,
+            settingsCardRef,
+            resultsCardRef,
+            recentCardRef,
+            chatPanelRef,
+          ]
+        : activeNav === "models"
+          ? [sidebarRef]
+          : [sidebarRef, pageShellRef];
     const measure = () => {
       const shapes = refs
         .map((ref) => ref.current)
         .filter((el): el is HTMLElement => el !== null)
         .map((el) => rectToGlassShape(el.getBoundingClientRect()));
-      onShapesChange(shapes);
+      setShellGlassShapes(shapes);
     };
 
     const raf = requestAnimationFrame(measure);
@@ -1216,7 +1241,7 @@ function SimpleGenerateView({
       observer.disconnect();
       window.removeEventListener("resize", onResize);
     };
-  }, [onShapesChange, activeNav]);
+  }, [activeNav, sidebarExpanded, assistantShouldShow]);
 
   return (
     <main className="relative z-20 h-[calc(100vh-76px)] overflow-hidden">
@@ -1288,7 +1313,7 @@ function SimpleGenerateView({
 
           {/* 导航项 */}
           <div className="mt-4 flex flex-col gap-1">
-            {SIDEBAR_ITEMS.map((it) => (
+            {SIDEBAR_ITEMS.filter((it) => !it.adminOnly || user?.role === "admin").map((it) => (
               <SidebarItem
                 key={it.key}
                 icon={it.icon}
@@ -1327,11 +1352,19 @@ function SimpleGenerateView({
         </aside>
 
         {activeNav === "models" ? (
-          <ModelPlaza onShapesChange={onShapesChange} />
+          <ModelPlaza onShapesChange={setPageGlassShapes} />
         ) : activeNav === "gallery" ? (
-          <GalleryPage onPreview={(src) => setPreviewSrc(src)} />
+          <div ref={pageShellRef} className="min-w-0 flex-1 overflow-hidden rounded-[28px] p-5">
+            <GalleryPage onPreview={(src) => setPreviewSrc(src)} />
+          </div>
         ) : activeNav === "logs" ? (
-          <LogsPage onPreview={(src) => setPreviewSrc(src)} />
+          <div ref={pageShellRef} className="min-w-0 flex-1 overflow-hidden rounded-[28px] p-5">
+            <LogsPage onPreview={(src) => setPreviewSrc(src)} />
+          </div>
+        ) : activeNav === "admin" ? (
+          <div ref={pageShellRef} className="min-w-0 flex-1 overflow-hidden rounded-[28px] p-5">
+            <AdminPage />
+          </div>
         ) : (
         <div className="flex min-w-0 flex-1 flex-col gap-3">
           {/* 顶部标题（贴外、不进卡） */}
@@ -1734,10 +1767,10 @@ function SimpleGenerateView({
             ref={resultsCardRef}
             className="flex min-h-0 flex-col rounded-[28px] p-5"
           >
-            <div className="mb-3 flex shrink-0 items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <span className="text-[13px] font-medium text-white/92">结果</span>
-                <span className="flex items-center gap-1.5 text-[11px] text-white/42">
+            <div className="mb-3 flex shrink-0 flex-wrap items-start justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="shrink-0 text-[13px] font-medium text-white/92">结果</span>
+                <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-white/42">
                   {mode === "edit" && (
                     <span className="rounded-full bg-accent-foxo/12 px-1.5 py-0.5 text-[10px] text-accent-foxo">修改</span>
                   )}
@@ -1753,13 +1786,13 @@ function SimpleGenerateView({
                 <MetricChip label="Total" value={usage ? String(usage.total_tokens) : "—"} />
                 <button
                   disabled={!results.length}
-                  className="rounded-full bg-white/[0.04] px-3 py-1.5 text-[12px] font-medium text-white/68 hover:bg-white/[0.08] disabled:opacity-40"
+                  className="shrink-0 whitespace-nowrap rounded-full bg-white/[0.04] px-3 py-1.5 text-[12px] font-medium text-white/68 hover:bg-white/[0.08] disabled:opacity-40"
                 >
                   下载
                 </button>
                 <button
                   disabled={!results.length}
-                  className="rounded-full bg-white px-3 py-1.5 text-[12px] font-medium text-[#0D0D0D] disabled:opacity-40"
+                  className="shrink-0 whitespace-nowrap rounded-full bg-white px-3 py-1.5 text-[12px] font-medium text-[#0D0D0D] disabled:opacity-40"
                 >
                   分享
                 </button>
@@ -1811,13 +1844,15 @@ function SimpleGenerateView({
         </div>
         )}
 
-        {activeNav !== "models" && (
-        <>
+        {assistantShouldShow && (
+        <div
+          ref={assistantDockRef}
+          className="flex h-full min-h-0 w-[clamp(324px,29vw,360px)] shrink-0 items-stretch gap-2 overflow-hidden"
+        >
         {/* 右侧 AI 对话面板 */}
         <aside
           ref={chatPanelRef}
-          className="flex shrink-0 flex-col gap-3 rounded-[28px] p-4"
-          style={{ width: 340 }}
+          className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-hidden rounded-[28px] p-4"
         >
           <div className="relative flex shrink-0 items-center justify-between">
             <div className="flex items-center gap-2">
@@ -2043,7 +2078,7 @@ function SimpleGenerateView({
           messages={chatMessages.filter((m) => typeof m.id === "number")}
           scrollContainerRef={chatScrollRef}
         />
-        </>
+        </div>
         )}
       </div>
 
@@ -2141,11 +2176,12 @@ function MetricChip({ label, value }: { label: string; value: string }) {
 }
 
 /* ---------- 侧栏 / 聊天 ---------- */
-const SIDEBAR_ITEMS: ReadonlyArray<{ key: string; label: string; icon: ReactNode }> = [
+const SIDEBAR_ITEMS: ReadonlyArray<{ key: AppNavKey; label: string; icon: ReactNode; adminOnly?: boolean }> = [
   { key: "studio",  label: "工作室", icon: <StudioIcon /> },
   { key: "gallery", label: "画廊",   icon: <GalleryIcon /> },
   { key: "models",  label: "模型",   icon: <ModelsIcon /> },
   { key: "logs",    label: "日志",   icon: <HistoryIcon /> },
+  { key: "admin",   label: "管理",   icon: <AdminIcon />, adminOnly: true },
 ];
 
 function SidebarItem({
@@ -2260,45 +2296,13 @@ function ChatBubble({
           <div className="flex flex-col gap-1.5">
             <div className={imageUrls!.length === 1 ? "" : "grid grid-cols-2 gap-1.5"}>
               {imageUrls!.map((u) => (
-                <div key={u} className="group relative">
-                  <button
-                    type="button"
-                    onClick={() => onImageClick?.(safeImageSrc(u))}
-                    className="block overflow-hidden rounded-[10px] ring-1 ring-inset ring-white/[0.06] transition-transform hover:scale-[1.02]"
-                    style={{ aspectRatio: aspect }}
-                  >
-                    <img
-                      src={safeImageSrc(u)}
-                      alt=""
-                      className="h-full w-full object-cover"
-                      loading="lazy"
-                      decoding="async"
-                    />
-                  </button>
-                  {onEditFromImage && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onEditFromImage(safeImageSrc(u));
-                      }}
-                      title="作为修改起点"
-                      aria-label="作为修改起点"
-                      className="absolute right-1.5 top-1.5 grid h-7 w-7 place-items-center rounded-full bg-black/55 text-white/82 opacity-0 backdrop-blur-sm transition-opacity hover:bg-black/72 hover:text-white group-hover:opacity-100"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                        <path
-                          d="M11.5 2.5 13.5 4.5 4.5 13.5 2 14 2.5 11.5z"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.4"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      </svg>
-                    </button>
-                  )}
-                </div>
+                <GeneratedImageThumb
+                  key={u}
+                  rawSrc={u}
+                  aspect={aspect}
+                  onImageClick={onImageClick}
+                  onEditFromImage={onEditFromImage}
+                />
               ))}
             </div>
             {children && <div className="px-1 text-[11px] text-white/55">{children}</div>}
@@ -2307,6 +2311,77 @@ function ChatBubble({
           children
         )}
       </div>
+    </div>
+  );
+}
+
+function GeneratedImageThumb({
+  rawSrc,
+  aspect,
+  onImageClick,
+  onEditFromImage,
+}: {
+  rawSrc: string;
+  aspect: string;
+  onImageClick?: (src: string) => void;
+  onEditFromImage?: (src: string) => void;
+}) {
+  const [failed, setFailed] = useState(false);
+  const src = safeImageSrc(rawSrc);
+
+  if (failed) {
+    return (
+      <div
+        className="grid place-items-center rounded-[10px] border border-dashed border-white/[0.10] bg-[#111114] px-3 text-center"
+        style={{ aspectRatio: aspect }}
+      >
+        <span className="text-[11px] leading-tight text-white/45" aria-label="图片加载失败">
+          图片加载失败
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="group relative">
+      <button
+        type="button"
+        onClick={() => onImageClick?.(src)}
+        className="block overflow-hidden rounded-[10px] ring-1 ring-inset ring-white/[0.06] transition-transform hover:scale-[1.02]"
+        style={{ aspectRatio: aspect }}
+      >
+        <img
+          src={src}
+          alt=""
+          className="h-full w-full object-cover"
+          loading="lazy"
+          decoding="async"
+          onError={() => setFailed(true)}
+        />
+      </button>
+      {onEditFromImage && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onEditFromImage(src);
+          }}
+          title="作为修改起点"
+          aria-label="作为修改起点"
+          className="absolute right-1.5 top-1.5 grid h-7 w-7 place-items-center rounded-full bg-black/55 text-white/82 opacity-0 backdrop-blur-sm transition-opacity hover:bg-black/72 hover:text-white group-hover:opacity-100"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path
+              d="M11.5 2.5 13.5 4.5 4.5 13.5 2 14 2.5 11.5z"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
+      )}
     </div>
   );
 }
@@ -2369,6 +2444,14 @@ function GearIcon() {
     <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="10" cy="10" r="2.4" />
       <path d="M16.5 10a6.5 6.5 0 0 0-.1-1.1l1.5-1.1-1.3-2.2-1.7.6a6.5 6.5 0 0 0-1.9-1.1L12.7 3h-2.6l-.3 2.1a6.5 6.5 0 0 0-1.9 1.1l-1.7-.6L4.9 7.8l1.5 1.1a6.5 6.5 0 0 0 0 2.2L4.9 12.2l1.3 2.2 1.7-.6a6.5 6.5 0 0 0 1.9 1.1l.3 2.1h2.6l.3-2.1a6.5 6.5 0 0 0 1.9-1.1l1.7.6 1.3-2.2-1.5-1.1c.07-.36.1-.73.1-1.1z" />
+    </svg>
+  );
+}
+function AdminIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M10 2l7 4v4c0 4.4-3 7.5-7 9-4-1.5-7-4.6-7-9V6l7-4z" />
+      <path d="M7.5 10l2 2 3.5-4" />
     </svg>
   );
 }

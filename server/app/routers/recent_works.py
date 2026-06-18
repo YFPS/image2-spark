@@ -11,8 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..deps import get_current_user
 from ..models import User
-from ..schemas import RecentWorkItem, RecentWorksOut
-from ..works_service import build_works_query, message_to_recent_work_item
+from ..schemas import RecentWorksOut
+from ..works_service import fetch_recent_work_items
 
 router = APIRouter(prefix="/api/me", tags=["recent_works"])
 
@@ -25,11 +25,5 @@ async def list_recent_works(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> RecentWorksOut:
-    stmt = build_works_query(user.id, limit=RECENT_LIMIT)
-    rows = (await db.execute(stmt)).scalars().all()
-    items: list[RecentWorkItem] = []
-    for m in rows:
-        item = message_to_recent_work_item(m)
-        if item is not None:
-            items.append(item)
+    items, _next_cursor = await fetch_recent_work_items(db, user.id, limit=RECENT_LIMIT)
     return RecentWorksOut(items=items)

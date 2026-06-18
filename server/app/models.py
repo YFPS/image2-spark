@@ -154,6 +154,112 @@ class EmailVerificationToken(Base):
     )
 
 
+class AccessLog(Base):
+    """HTTP 访问日志 —— 中间件自动写入"""
+
+    __tablename__ = "access_logs"
+    __table_args__ = (
+        Index("idx_al_time", "created_at"),
+        Index("idx_al_user_time", "user_id", "created_at"),
+        Index("idx_al_path", "path", "created_at"),
+        {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_0900_ai_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(MyBigInt(unsigned=True), primary_key=True, autoincrement=True)
+    method: Mapped[str] = mapped_column(String(10), nullable=False)
+    path: Mapped[str] = mapped_column(String(512), nullable=False)
+    status_code: Mapped[int] = mapped_column(nullable=False)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_id: Mapped[int | None] = mapped_column(MyBigInt(unsigned=True), nullable=True)
+    duration_ms: Mapped[int] = mapped_column(nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.current_timestamp()
+    )
+
+
+class AdminLog(Base):
+    """管理员操作审计日志"""
+
+    __tablename__ = "admin_logs"
+    __table_args__ = (
+        Index("idx_admlog_admin_time", "admin_id", "created_at"),
+        Index("idx_admlog_target", "target_type", "target_id"),
+        {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_0900_ai_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(MyBigInt(unsigned=True), primary_key=True, autoincrement=True)
+    admin_id: Mapped[int] = mapped_column(MyBigInt(unsigned=True), nullable=False)
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    target_id: Mapped[int | None] = mapped_column(MyBigInt(unsigned=True), nullable=True)
+    detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.current_timestamp()
+    )
+
+
+class AuditLog(Base):
+    """安全审计日志：记录注册、邮箱验证、积分变动等用户级安全事件。"""
+
+    __tablename__ = "audit_logs"
+    __table_args__ = (
+        Index("idx_audit_event_time", "event_type", "created_at"),
+        Index("idx_audit_user_time", "user_id", "created_at"),
+        Index("idx_audit_ip_time", "ip", "created_at"),
+        {
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+            "mysql_collate": "utf8mb4_0900_ai_ci",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(MyBigInt(unsigned=True), primary_key=True, autoincrement=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[int | None] = mapped_column(
+        MyBigInt(unsigned=True),
+        ForeignKey("users.id", ondelete="SET NULL", name="fk_audit_user"),
+        nullable=True,
+    )
+    email: Mapped[str | None] = mapped_column(String(254), nullable=True)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.current_timestamp()
+    )
+
+
+class UpstreamChannel(Base):
+    """上游 API 渠道配置"""
+
+    __tablename__ = "upstream_channels"
+    __table_args__ = (
+        {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_0900_ai_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(MyBigInt(unsigned=True), primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    api_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    priority: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
+    supports_edit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    max_concurrent: Mapped[int] = mapped_column(nullable=False, default=10, server_default="10")
+    timeout_seconds: Mapped[int] = mapped_column(nullable=False, default=300, server_default="300")
+    last_health_check: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_health_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    last_latency_ms: Mapped[int | None] = mapped_column(nullable=True)
+    total_requests: Mapped[int] = mapped_column(MyBigInt(unsigned=True), nullable=False, default=0, server_default="0")
+    total_failures: Mapped[int] = mapped_column(MyBigInt(unsigned=True), nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.current_timestamp()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.current_timestamp()
+    )
+
+
 class Conversation(Base):
     """AI 对话会话 —— 一条记录对应一次完整的会话上下文"""
 
