@@ -255,6 +255,12 @@ export type RecentWorksOut = {
   items: RecentWorkItem[];
 };
 
+export function isAssetBackedRecentWorkItem(item: RecentWorkItem): boolean {
+  if (!item.created_at) return false;
+  const urls = [item.image_url, ...(item.all_image_urls ?? [])];
+  return urls.every((url) => !url.startsWith("data:image"));
+}
+
 /** 拉用户最近完成的 AI 出图（最多 12 条，按 created_at 倒序）*/
 export async function fetchRecentWorks(): Promise<RecentWorkItem[]> {
   const res = await authFetch("/api/me/recent-works");
@@ -262,7 +268,7 @@ export async function fetchRecentWorks(): Promise<RecentWorkItem[]> {
     throw new Error(`fetchRecentWorks failed: ${res.status}`);
   }
   const data = (await res.json()) as RecentWorksOut;
-  return data.items;
+  return data.items.filter(isAssetBackedRecentWorkItem);
 }
 
 // ===== 画廊（GET /api/me/works）=====
@@ -284,5 +290,9 @@ export async function fetchWorks(opts?: {
   if (!res.ok) {
     throw new Error(`fetchWorks failed: ${res.status}`);
   }
-  return (await res.json()) as WorksPage;
+  const data = (await res.json()) as WorksPage;
+  return {
+    ...data,
+    items: data.items.filter(isAssetBackedRecentWorkItem),
+  };
 }

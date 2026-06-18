@@ -51,3 +51,49 @@ test("formatRelativeTime treats naive backend timestamps as UTC elapsed time", (
     "昨天",
   );
 });
+
+test("recent work items must be asset-backed and timestamped", () => {
+  const { isAssetBackedRecentWorkItem } = loadTsModule("src/api/gptImage.ts", {
+    "./auth": { authFetch: () => { throw new Error("not used"); } },
+    "./conversations": {},
+  });
+
+  assert.equal(
+    isAssetBackedRecentWorkItem({
+      message_id: 1,
+      conversation_id: 2,
+      image_url: "/api/images/local/1-0.png",
+      image_count: 1,
+      all_image_urls: ["/api/images/local/1-0.png"],
+      size: null,
+      created_at: "2026-06-19T12:00:00Z",
+    }),
+    true,
+  );
+
+  assert.equal(
+    isAssetBackedRecentWorkItem({
+      message_id: 1,
+      conversation_id: 2,
+      image_url: "data:image/png;base64,abc",
+      image_count: 1,
+      all_image_urls: ["data:image/png;base64,abc"],
+      size: null,
+      created_at: "2026-06-19T12:00:00Z",
+    }),
+    false,
+  );
+
+  assert.equal(
+    isAssetBackedRecentWorkItem({
+      message_id: 1,
+      conversation_id: 2,
+      image_url: "/api/images/local/1-0.png",
+      image_count: 1,
+      all_image_urls: ["/api/images/local/1-0.png"],
+      size: null,
+      created_at: "",
+    }),
+    false,
+  );
+});
