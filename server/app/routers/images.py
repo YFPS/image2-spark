@@ -60,6 +60,7 @@ from ..schemas import (
     SegmentRequest,
 )
 from ..segment_service import fetch_image_bytes, segment_brush_mobile_sam, segment_sync
+from ..upstream_monitoring import UpstreamAttempt, record_upstream_attempts
 
 limiter = get_limiter()
 
@@ -447,6 +448,34 @@ async def _update_upstream_stats(
             logger.exception("更新上游渠道统计失败")
 
 
+async def _record_upstream_outcome(
+    factory,
+    attempts: list[UpstreamAttempt],
+    *,
+    message_id: int,
+    conversation_id: int,
+    user_id: int,
+    final_success: bool,
+    image_count: int | None = None,
+    business_error_code: str | None = None,
+    business_error_message: str | None = None,
+) -> None:
+    try:
+        await record_upstream_attempts(
+            factory,
+            attempts,
+            message_id=message_id,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            final_success=final_success,
+            image_count=image_count,
+            business_error_code=business_error_code,
+            business_error_message=business_error_message,
+        )
+    except Exception:
+        logger.exception("写入上游请求明细失败 message_id=%s", message_id)
+
+
 # ===== /generate =====
 
 
@@ -460,14 +489,24 @@ async def _run_generate_task(
 ) -> None:
     """后台任务：调上游 generate，回写 message。失败时退款。"""
     factory = get_session_factory()
+    attempts: list[UpstreamAttempt] = []
     try:
-        upstream_json = await call_images_generate(payload)
+        upstream_json = await call_images_generate(payload, attempts=attempts)
     except UpstreamTimeout as e:
         await _finalize_message(
             factory, ai_msg_id, conv_id, ok=False, text=f"失败：上游超时 ({e})"
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"上游超时 ({e})")
-        await _update_upstream_stats(factory, success=False)
+        await _record_upstream_outcome(
+            factory,
+            attempts,
+            message_id=ai_msg_id,
+            conversation_id=conv_id,
+            user_id=user_id,
+            final_success=False,
+            business_error_code="timeout",
+            business_error_message=str(e),
+        )
         return
     except UpstreamError as e:
         await _finalize_message(
@@ -475,7 +514,16 @@ async def _run_generate_task(
             text=f"失败：upstream_error：{e}",
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"upstream_error: {e}")
-        await _update_upstream_stats(factory, success=False)
+        await _record_upstream_outcome(
+            factory,
+            attempts,
+            message_id=ai_msg_id,
+            conversation_id=conv_id,
+            user_id=user_id,
+            final_success=False,
+            business_error_code="upstream_error",
+            business_error_message=str(e),
+        )
         return
     except Exception as e:  # noqa: BLE001
         logger.exception("generate task 异常 ai_msg_id=%s", ai_msg_id)
@@ -483,7 +531,16 @@ async def _run_generate_task(
             factory, ai_msg_id, conv_id, ok=False, text=f"失败：{e}"
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"task 异常: {e}")
-        await _update_upstream_stats(factory, success=False)
+        await _record_upstream_outcome(
+            factory,
+            attempts,
+            message_id=ai_msg_id,
+            conversation_id=conv_id,
+            user_id=user_id,
+            final_success=False,
+            business_error_code="task_error",
+            business_error_message=str(e),
+        )
         return
 
     output_format = str(payload.get("output_format") or "png")
@@ -500,7 +557,17 @@ async def _run_generate_task(
             text=f"失败：上游未返回任何图片（usage {usage['total_tokens']} tokens）",
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, "上游 data=[] 未返回图片")
-        await _update_upstream_stats(factory, success=False)
+        await _record_upstream_outcome(
+            factory,
+            attempts,
+            message_id=ai_msg_id,
+            conversation_id=conv_id,
+            user_id=user_id,
+            final_success=False,
+            image_count=0,
+            business_error_code="empty_data",
+            business_error_message="上游未返回任何图片",
+        )
         return
 
     # 部分缺图：按缺失张数退款（每张 1 分，与 _calculate_cost 对齐）
@@ -533,7 +600,15 @@ async def _run_generate_task(
         factory, ai_msg_id, conv_id, ok=True, text=text,
         image_urls=urls, params=params,
     )
-    await _update_upstream_stats(factory, success=True)
+    await _record_upstream_outcome(
+        factory,
+        attempts,
+        message_id=ai_msg_id,
+        conversation_id=conv_id,
+        user_id=user_id,
+        final_success=True,
+        image_count=returned,
+    )
 
 
 @router.post("/generate", response_model=MessageOut)
@@ -612,14 +687,24 @@ async def _run_edit_task(
 ) -> None:
     """后台任务：调上游 edit，回写 message。失败时退款。"""
     factory = get_session_factory()
+    attempts: list[UpstreamAttempt] = []
     try:
-        upstream_json = await call_images_edit(fields, files, force_backup=force_backup)
+        upstream_json = await call_images_edit(fields, files, force_backup=force_backup, attempts=attempts)
     except UpstreamTimeout as e:
         await _finalize_message(
             factory, ai_msg_id, conv_id, ok=False, text=f"失败：上游超时 ({e})"
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"上游超时 ({e})")
-        await _update_upstream_stats(factory, success=False)
+        await _record_upstream_outcome(
+            factory,
+            attempts,
+            message_id=ai_msg_id,
+            conversation_id=conv_id,
+            user_id=user_id,
+            final_success=False,
+            business_error_code="timeout",
+            business_error_message=str(e),
+        )
         return
     except UpstreamError as e:
         await _finalize_message(
@@ -627,7 +712,16 @@ async def _run_edit_task(
             text=f"失败：upstream_error：{e}",
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"upstream_error: {e}")
-        await _update_upstream_stats(factory, success=False)
+        await _record_upstream_outcome(
+            factory,
+            attempts,
+            message_id=ai_msg_id,
+            conversation_id=conv_id,
+            user_id=user_id,
+            final_success=False,
+            business_error_code="upstream_error",
+            business_error_message=str(e),
+        )
         return
     except Exception as e:  # noqa: BLE001
         logger.exception("edit task 异常 ai_msg_id=%s", ai_msg_id)
@@ -635,7 +729,16 @@ async def _run_edit_task(
             factory, ai_msg_id, conv_id, ok=False, text=f"失败：{e}"
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"task 异常: {e}")
-        await _update_upstream_stats(factory, success=False)
+        await _record_upstream_outcome(
+            factory,
+            attempts,
+            message_id=ai_msg_id,
+            conversation_id=conv_id,
+            user_id=user_id,
+            final_success=False,
+            business_error_code="task_error",
+            business_error_message=str(e),
+        )
         return
 
     output_format = str(fields.get("output_format") or "png")
@@ -652,7 +755,17 @@ async def _run_edit_task(
             text=f"失败：上游未返回任何图片（usage {usage['total_tokens']} tokens）",
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, "上游 data=[] 未返回图片")
-        await _update_upstream_stats(factory, success=False)
+        await _record_upstream_outcome(
+            factory,
+            attempts,
+            message_id=ai_msg_id,
+            conversation_id=conv_id,
+            user_id=user_id,
+            final_success=False,
+            image_count=0,
+            business_error_code="empty_data",
+            business_error_message="上游未返回任何图片",
+        )
         return
 
     # 部分缺图：按缺失张数退款（每张 1 分）
@@ -689,7 +802,15 @@ async def _run_edit_task(
         factory, ai_msg_id, conv_id, ok=True, text=text,
         image_urls=urls, params=params,
     )
-    await _update_upstream_stats(factory, success=True)
+    await _record_upstream_outcome(
+        factory,
+        attempts,
+        message_id=ai_msg_id,
+        conversation_id=conv_id,
+        user_id=user_id,
+        final_success=True,
+        image_count=returned,
+    )
 
 
 @router.post("/edit", response_model=MessageOut)

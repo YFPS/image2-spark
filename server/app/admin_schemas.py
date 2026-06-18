@@ -176,3 +176,9 @@ class UpstreamHealthItem(BaseModel):
     total_requests: int
     total_failures: int
     failure_rate: float
+    avg_latency_ms: int | None = None
+    p95_latency_ms: int | None = None
+    recent_requests: int = 0
+    recent_failures: int = 0
+    recent_failure_rate: float = 0.0
+    recent_p95_latency_ms: int | None = None

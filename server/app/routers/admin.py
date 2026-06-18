@@ -42,9 +42,11 @@ from ..models import (
     CreditTransaction,
     Message,
     UpstreamChannel,
+    UpstreamRequestLog,
     User,
 )
 from ..schemas import MessageOut
+from ..upstream_monitoring import UpstreamAttempt, summarize_upstream_metrics
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -748,6 +750,79 @@ async def delete_upstream(
     return {"ok": True}
 
 
+def _utc(dt: datetime) -> datetime:
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
+async def _recent_upstream_metrics(
+    db: AsyncSession,
+    channels: list[UpstreamChannel],
+) -> dict[int, Any]:
+    channel_ids = [ch.id for ch in channels]
+    if not channel_ids:
+        return {}
+    since = datetime.now(tz=timezone.utc) - timedelta(days=1)
+    rows = (
+        await db.execute(
+            select(UpstreamRequestLog)
+            .where(
+                UpstreamRequestLog.channel_id.in_(channel_ids),
+                UpstreamRequestLog.created_at >= since.replace(tzinfo=None),
+            )
+            .order_by(UpstreamRequestLog.created_at.desc())
+        )
+    ).scalars().all()
+    attempts = [
+        UpstreamAttempt(
+            channel_id=row.channel_id,
+            endpoint=row.endpoint,
+            base_url=row.base_url,
+            ok=row.ok,
+            latency_ms=row.latency_ms,
+            status_code=row.status_code,
+            error_code=row.error_code,
+            error_message=row.error_message,
+            used_fallback=row.used_fallback,
+            model=row.model,
+            image_count=row.image_count,
+            created_at=_utc(row.created_at),
+        )
+        for row in rows
+    ]
+    return summarize_upstream_metrics(attempts, now=datetime.now(tz=timezone.utc))
+
+
+def _upstream_health_item(
+    ch: UpstreamChannel,
+    metrics_by_channel: dict[int, Any],
+) -> UpstreamHealthItem:
+    failure_rate = (ch.total_failures / ch.total_requests * 100) if ch.total_requests > 0 else 0.0
+    metrics = metrics_by_channel.get(ch.id)
+    recent_requests = metrics.recent_requests if metrics else 0
+    recent_failures = metrics.recent_failures if metrics else 0
+    recent_failure_rate = (
+        round(recent_failures / recent_requests * 100, 2) if recent_requests > 0 else 0.0
+    )
+    return UpstreamHealthItem(
+        id=ch.id,
+        name=ch.name,
+        base_url=ch.base_url,
+        enabled=ch.enabled,
+        last_health_ok=ch.last_health_ok,
+        last_latency_ms=ch.last_latency_ms,
+        last_health_check=ch.last_health_check,
+        total_requests=ch.total_requests,
+        total_failures=ch.total_failures,
+        failure_rate=round(failure_rate, 2),
+        avg_latency_ms=metrics.avg_latency_ms if metrics else None,
+        p95_latency_ms=metrics.p95_latency_ms if metrics else None,
+        recent_requests=recent_requests,
+        recent_failures=recent_failures,
+        recent_failure_rate=recent_failure_rate,
+        recent_p95_latency_ms=metrics.recent_p95_latency_ms if metrics else None,
+    )
+
+
 @router.post("/upstreams/{channel_id}/health-check")
 async def health_check_upstream(
     channel_id: int,
@@ -781,17 +856,7 @@ async def health_check_upstream(
     await db.commit()
     await db.refresh(ch)
 
-    failure_rate = (ch.total_failures / ch.total_requests * 100) if ch.total_requests > 0 else 0.0
-    return UpstreamHealthItem(
-        id=ch.id, name=ch.name, base_url=ch.base_url,
-        enabled=ch.enabled,
-        last_health_ok=ch.last_health_ok,
-        last_latency_ms=ch.last_latency_ms,
-        last_health_check=ch.last_health_check,
-        total_requests=ch.total_requests,
-        total_failures=ch.total_failures,
-        failure_rate=round(failure_rate, 2),
-    )
+    return _upstream_health_item(ch, await _recent_upstream_metrics(db, [ch]))
 
 
 @router.get("/upstreams/status", response_model=list[UpstreamHealthItem])
@@ -800,17 +865,5 @@ async def upstream_status(
     db: AsyncSession = Depends(get_db),
 ) -> list[UpstreamHealthItem]:
     rows = (await db.execute(select(UpstreamChannel))).scalars().all()
-    result = []
-    for ch in rows:
-        failure_rate = (ch.total_failures / ch.total_requests * 100) if ch.total_requests > 0 else 0.0
-        result.append(UpstreamHealthItem(
-            id=ch.id, name=ch.name, base_url=ch.base_url,
-            enabled=ch.enabled,
-            last_health_ok=ch.last_health_ok,
-            last_latency_ms=ch.last_latency_ms,
-            last_health_check=ch.last_health_check,
-            total_requests=ch.total_requests,
-            total_failures=ch.total_failures,
-            failure_rate=round(failure_rate, 2),
-        ))
-    return result
+    metrics = await _recent_upstream_metrics(db, rows)
+    return [_upstream_health_item(ch, metrics) for ch in rows]

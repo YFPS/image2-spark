@@ -96,6 +96,12 @@ export type UpstreamHealth = {
   total_requests: number;
   total_failures: number;
   failure_rate: number;
+  avg_latency_ms: number | null;
+  p95_latency_ms: number | null;
+  recent_requests: number;
+  recent_failures: number;
+  recent_failure_rate: number;
+  recent_p95_latency_ms: number | null;
 };
 
 export type Paged<T> = { items: T[]; total: number; page: number; page_size: number };

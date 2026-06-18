@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 import httpx
 
 from .config import get_settings
+from .upstream_monitoring import UpstreamAttempt
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,163 @@ def _should_fallback(exc: Exception) -> bool:
     if isinstance(exc, UpstreamError):
         return exc.status >= 500 or exc.status in {401, 408, 429}
     return False
+
+
+def _attempt_error_code(exc: Exception) -> str:
+    if isinstance(exc, UpstreamTimeout):
+        return "timeout"
+    if isinstance(exc, UpstreamError):
+        if exc.status >= 500:
+            return "upstream_5xx"
+        if exc.status == 429:
+            return "rate_limited"
+        if exc.status in {401, 403}:
+            return "auth_error"
+        return "upstream_4xx"
+    return "unexpected_error"
+
+
+def _append_attempt(
+    attempts: list[UpstreamAttempt] | None,
+    *,
+    endpoint: str,
+    base_url: str,
+    model: str | None,
+    used_fallback: bool,
+    started: float,
+    ok: bool,
+    status_code: int | None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    if attempts is None:
+        return
+    attempts.append(
+        UpstreamAttempt(
+            endpoint=endpoint,
+            base_url=base_url,
+            ok=ok,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            status_code=status_code,
+            error_code=error_code,
+            error_message=error_message,
+            used_fallback=used_fallback,
+            model=model,
+        )
+    )
+
+
+async def _post_json_attempt(
+    base_url: str,
+    api_key: str,
+    path: str,
+    payload: dict[str, Any],
+    timeout: float,
+    *,
+    attempts: list[UpstreamAttempt] | None,
+    used_fallback: bool,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    model = str(payload.get("model") or "") or None
+    endpoint = path.strip("/").replace("/", ".")
+    try:
+        data = await _post_json_once(base_url, api_key, path, payload, timeout)
+    except (UpstreamError, UpstreamTimeout) as exc:
+        _append_attempt(
+            attempts,
+            endpoint=endpoint,
+            base_url=base_url,
+            model=model,
+            used_fallback=used_fallback,
+            started=started,
+            ok=False,
+            status_code=exc.status if isinstance(exc, UpstreamError) else None,
+            error_code=_attempt_error_code(exc),
+            error_message=str(exc),
+        )
+        raise
+    except Exception as exc:
+        _append_attempt(
+            attempts,
+            endpoint=endpoint,
+            base_url=base_url,
+            model=model,
+            used_fallback=used_fallback,
+            started=started,
+            ok=False,
+            status_code=None,
+            error_code=_attempt_error_code(exc),
+            error_message=str(exc),
+        )
+        raise
+    _append_attempt(
+        attempts,
+        endpoint=endpoint,
+        base_url=base_url,
+        model=model,
+        used_fallback=used_fallback,
+        started=started,
+        ok=True,
+        status_code=200,
+    )
+    return data
+
+
+async def _post_multipart_attempt(
+    base_url: str,
+    api_key: str,
+    path: str,
+    fields: dict[str, Any],
+    files: dict[str, tuple[str, bytes, str]] | list[tuple[str, tuple[str, bytes, str]]],
+    timeout: float,
+    *,
+    attempts: list[UpstreamAttempt] | None,
+    used_fallback: bool,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    model = str(fields.get("model") or "") or None
+    endpoint = path.strip("/").replace("/", ".")
+    try:
+        data = await _post_multipart_once(base_url, api_key, path, fields, files, timeout)
+    except (UpstreamError, UpstreamTimeout) as exc:
+        _append_attempt(
+            attempts,
+            endpoint=endpoint,
+            base_url=base_url,
+            model=model,
+            used_fallback=used_fallback,
+            started=started,
+            ok=False,
+            status_code=exc.status if isinstance(exc, UpstreamError) else None,
+            error_code=_attempt_error_code(exc),
+            error_message=str(exc),
+        )
+        raise
+    except Exception as exc:
+        _append_attempt(
+            attempts,
+            endpoint=endpoint,
+            base_url=base_url,
+            model=model,
+            used_fallback=used_fallback,
+            started=started,
+            ok=False,
+            status_code=None,
+            error_code=_attempt_error_code(exc),
+            error_message=str(exc),
+        )
+        raise
+    _append_attempt(
+        attempts,
+        endpoint=endpoint,
+        base_url=base_url,
+        model=model,
+        used_fallback=used_fallback,
+        started=started,
+        ok=True,
+        status_code=200,
+    )
+    return data
 
 
 async def _post_json_once(
@@ -138,7 +297,11 @@ async def _post_multipart_once(
     return r.json()
 
 
-async def call_images_generate(payload: dict[str, Any]) -> dict[str, Any]:
+async def call_images_generate(
+    payload: dict[str, Any],
+    *,
+    attempts: list[UpstreamAttempt] | None = None,
+) -> dict[str, Any]:
     """调上游 /images/generations，返回解析后的 JSON。主上游失败按规则回退备用上游一次"""
     settings = get_settings()
     if not settings.openai_api_key:
@@ -155,12 +318,14 @@ async def call_images_generate(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
     try:
-        return await _post_json_once(
+        return await _post_json_attempt(
             settings.openai_base_url,
             settings.openai_api_key,
             "/images/generations",
             payload,
             settings.openai_timeout,
+            attempts=attempts,
+            used_fallback=False,
         )
     except (UpstreamError, UpstreamTimeout) as primary_err:
         backup_url = settings.openai_base_url_backup
@@ -172,12 +337,14 @@ async def call_images_generate(payload: dict[str, Any]) -> dict[str, Any]:
             primary_err,
             backup_url,
         )
-        return await _post_json_once(
+        return await _post_json_attempt(
             backup_url,
             backup_key,
             "/images/generations",
             payload,
             settings.openai_timeout,
+            attempts=attempts,
+            used_fallback=True,
         )
 
 
@@ -186,6 +353,7 @@ async def call_images_edit(
     files: dict[str, tuple[str, bytes, str]] | list[tuple[str, tuple[str, bytes, str]]],
     *,
     force_backup: bool = False,
+    attempts: list[UpstreamAttempt] | None = None,
 ) -> dict[str, Any]:
     """调上游 /images/edits（multipart），返回解析后的 JSON。
 
@@ -214,13 +382,15 @@ async def call_images_edit(
             fields.get("n"),
             safe_prompt,
         )
-        return await _post_multipart_once(
+        return await _post_multipart_attempt(
             backup_url,
             backup_key,
             "/images/edits",
             fields,
             files,
             settings.openai_timeout,
+            attempts=attempts,
+            used_fallback=True,
         )
 
     logger.info(
@@ -232,13 +402,15 @@ async def call_images_edit(
     )
 
     try:
-        return await _post_multipart_once(
+        return await _post_multipart_attempt(
             settings.openai_base_url,
             settings.openai_api_key,
             "/images/edits",
             fields,
             files,
             settings.openai_timeout,
+            attempts=attempts,
+            used_fallback=False,
         )
     except (UpstreamError, UpstreamTimeout) as primary_err:
         backup_url = settings.openai_base_url_backup
@@ -250,11 +422,13 @@ async def call_images_edit(
             primary_err,
             backup_url,
         )
-        return await _post_multipart_once(
+        return await _post_multipart_attempt(
             backup_url,
             backup_key,
             "/images/edits",
             fields,
             files,
             settings.openai_timeout,
+            attempts=attempts,
+            used_fallback=True,
         )

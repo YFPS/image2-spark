@@ -528,9 +528,11 @@ function MonitorTab() {
               {!ch.enabled && <span className="text-[10px] text-white/30">(已禁用)</span>}
             </div>
             <div className="mt-2 space-y-1 text-[12px] text-white/50">
-              <div>延迟: {ch.last_latency_ms !== null ? `${ch.last_latency_ms}ms` : "—"}</div>
-              <div>总请求: {ch.total_requests} · 失败: {ch.total_failures} · 失败率: {ch.failure_rate}%</div>
-              <div>上次检测: {ch.last_health_check ? new Date(ch.last_health_check).toLocaleString() : "从未"}</div>
+              <div>探活延迟: {ch.last_latency_ms !== null ? `${ch.last_latency_ms}ms` : "—"}</div>
+              <div>近 24h: {ch.recent_requests} 次 · 失败 {ch.recent_failures} · 失败率 {ch.recent_failure_rate}%</div>
+              <div>真实延迟: 平均 {ch.avg_latency_ms !== null ? `${ch.avg_latency_ms}ms` : "—"} · P95 {ch.recent_p95_latency_ms !== null ? `${ch.recent_p95_latency_ms}ms` : "—"}</div>
+              <div>累计: {ch.total_requests} 次 · 失败 {ch.total_failures} · 失败率 {ch.failure_rate}%</div>
+              <div>上次探活: {ch.last_health_check ? new Date(ch.last_health_check).toLocaleString() : "从未"}</div>
             </div>
             <button onClick={() => handleCheck(ch.id)} disabled={loading} className="mt-2 rounded bg-white/[0.06] px-3 py-1 text-[11px] hover:bg-white/10 disabled:opacity-40">检测</button>
           </div>

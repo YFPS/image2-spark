@@ -12,6 +12,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -258,6 +259,48 @@ class UpstreamChannel(Base):
         DateTime, nullable=False, server_default=func.current_timestamp()
     )
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.current_timestamp()
+    )
+
+
+class UpstreamRequestLog(Base):
+    """上游真实请求明细；一行对应一次主/备上游调用 attempt。"""
+
+    __tablename__ = "upstream_request_logs"
+    __table_args__ = (
+        Index("idx_upl_channel_time", "channel_id", "created_at"),
+        Index("idx_upl_message", "message_id"),
+        Index("idx_upl_endpoint_time", "endpoint", "created_at"),
+        Index("idx_upl_ok_time", "ok", "created_at"),
+        {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_0900_ai_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(MyBigInt(unsigned=True), primary_key=True, autoincrement=True)
+    channel_id: Mapped[int | None] = mapped_column(
+        MyBigInt(unsigned=True),
+        ForeignKey("upstream_channels.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    user_id: Mapped[int | None] = mapped_column(
+        MyBigInt(unsigned=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    conversation_id: Mapped[int | None] = mapped_column(
+        MyBigInt(unsigned=True), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
+    )
+    message_id: Mapped[int | None] = mapped_column(
+        MyBigInt(unsigned=True), ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
+    )
+    endpoint: Mapped[str] = mapped_column(String(64), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    used_fallback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    image_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.current_timestamp()
     )
 
