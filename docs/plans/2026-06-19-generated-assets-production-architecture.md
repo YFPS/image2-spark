@@ -323,7 +323,7 @@ class LocalAssetStorage:
         return StoredAsset(
             storage_kind="local",
             storage_key=filename,
-            public_url=f"/api/images/local/{filename}",
+            public_url=f"/api/images/assets/{filename}",
             mime_type=mime_type,
             bytes=len(body),
             sha256=sha256,
@@ -364,7 +364,7 @@ class LocalAssetStorageTests(unittest.IsolatedAsyncioTestCase):
                 slot_index=0,
             )
             self.assertEqual(asset.storage_kind, "local")
-            self.assertTrue(asset.public_url.startswith("/api/images/local/42-0-"))
+            self.assertTrue(asset.public_url.startswith("/api/images/assets/42-0-"))
             self.assertEqual(asset.bytes, len(body))
             self.assertEqual(len(asset.sha256), 64)
             self.assertTrue((Path(d) / asset.storage_key).is_file())
@@ -555,7 +555,7 @@ async def list_user_assets(
 async def test_persist_generated_assets_writes_asset_and_returns_public_url(self):
     # 创建 user / conversation / message
     # 调 persist_generated_assets(..., urls=["data:image/png;base64,..."])
-    # 断言返回 /api/images/local/
+    # 断言返回 /api/images/assets/
     # 断言 generated_assets 有一行 available local
 ```
 
@@ -686,9 +686,9 @@ if asset_items:
 ```python
 async def test_recent_works_prefers_generated_assets(self):
     # 同一个用户同时有 Message.image_urls 和 generated_assets
-    # generated_assets.public_url 使用 /api/images/local/new.png
+    # generated_assets.public_url 使用 /api/images/assets/new.png
     # Message.image_urls 使用 data:image 或旧 URL
-    # 断言接口返回 /api/images/local/new.png
+    # 断言接口返回 /api/images/assets/new.png
 ```
 
 - [ ] **Step 3: 更新 works 分页测试**

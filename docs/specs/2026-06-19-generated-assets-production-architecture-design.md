@@ -155,7 +155,7 @@ class AssetStorage(Protocol):
         ...
 ```
 
-第一阶段只实现 `LocalAssetStorage`，复用现有 `/api/images/local/{filename}` 读取路由。
+第一阶段只实现 `LocalAssetStorage`，公开读取路径使用 `/api/images/assets/{filename}`；旧 `/api/images/local/{filename}` 仅作为历史兼容入口保留。
 
 生产阶段增加 `CosAssetStorage`：
 
@@ -250,7 +250,7 @@ server/scripts/migrate_generated_assets.py
 
 | 历史 URL 类型 | 处理 |
 |---|---|
-| `/api/images/local/{filename}` | 校验文件存在，补 asset 记录 |
+| `/api/images/assets/{filename}` | 校验文件存在，补 asset 记录 |
 | `data:image/...` | 解码、保存为文件/COS、补 asset |
 | `http/https` 可访问 | 下载、保存为文件/COS、补 asset |
 | 已知死链主机 | 写 `missing` 或跳过展示，保留 `source_url` |

@@ -33,7 +33,7 @@ class GeneratedImageCacheTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             self.assertEqual(len(urls), 1)
-            self.assertTrue(urls[0].startswith("/api/images/local/123-0-"))
+            self.assertTrue(urls[0].startswith("/api/images/assets/123-0-"))
             saved = Path(tmp) / urls[0].rsplit("/", 1)[-1]
             self.assertEqual(saved.read_bytes(), png_bytes)
 
@@ -61,7 +61,7 @@ class GeneratedImageCacheTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(kwargs["conversation_id"], 8)
             self.assertEqual(kwargs["message_id"], 123)
             self.assertEqual(kwargs["urls"], ["data:image/png;base64,aGVsbG8="])
-            return ["/api/images/local/123-0.png"]
+            return ["/api/images/assets/123-0.png"]
 
         with patch("app.routers.images.persist_generated_assets", side_effect=fake_persist):
             urls = await images._persist_generated_assets_for_message(
@@ -74,7 +74,7 @@ class GeneratedImageCacheTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(session.committed)
-        self.assertEqual(urls, ["/api/images/local/123-0.png"])
+        self.assertEqual(urls, ["/api/images/assets/123-0.png"])
 
 
 if __name__ == "__main__":

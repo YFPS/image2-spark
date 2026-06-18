@@ -23,15 +23,15 @@ function loadTsModule(relativePath, stubs = {}) {
   return mod.exports;
 }
 
-test("safeImageSrc keeps same-origin generated image URLs unproxied", () => {
+test("safeImageSrc keeps same-origin asset image URLs unproxied", () => {
   const { safeImageSrc } = loadTsModule("src/api/gptImage.ts", {
     "./auth": { authFetch: () => { throw new Error("not used"); } },
     "./conversations": {},
   });
 
   assert.equal(
-    safeImageSrc("/api/images/local/123-0.png"),
-    "/api/images/local/123-0.png",
+    safeImageSrc("/api/images/assets/123-0.png"),
+    "/api/images/assets/123-0.png",
   );
   assert.equal(
     safeImageSrc("https://cdn.example/a.png"),
@@ -62,9 +62,9 @@ test("recent work items must be asset-backed and timestamped", () => {
     isAssetBackedRecentWorkItem({
       message_id: 1,
       conversation_id: 2,
-      image_url: "/api/images/local/1-0.png",
+      image_url: "/api/images/assets/1-0.png",
       image_count: 1,
-      all_image_urls: ["/api/images/local/1-0.png"],
+      all_image_urls: ["/api/images/assets/1-0.png"],
       size: null,
       created_at: "2026-06-19T12:00:00Z",
     }),
@@ -88,9 +88,9 @@ test("recent work items must be asset-backed and timestamped", () => {
     isAssetBackedRecentWorkItem({
       message_id: 1,
       conversation_id: 2,
-      image_url: "/api/images/local/1-0.png",
+      image_url: "/api/images/assets/1-0.png",
       image_count: 1,
-      all_image_urls: ["/api/images/local/1-0.png"],
+      all_image_urls: ["/api/images/assets/1-0.png"],
       size: null,
       created_at: "",
     }),

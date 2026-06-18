@@ -23,7 +23,7 @@ class LocalAssetStorageTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(asset.storage_kind, "local")
-            self.assertTrue(asset.public_url.startswith("/api/images/local/42-0-"))
+            self.assertTrue(asset.public_url.startswith("/api/images/assets/42-0-"))
             self.assertEqual(asset.bytes, len(body))
             self.assertEqual(len(asset.sha256), 64)
             self.assertTrue((Path(d) / asset.storage_key).is_file())
@@ -66,7 +66,7 @@ class FakeStorage:
         return StoredAsset(
             storage_kind="local",
             storage_key=f"{message_id}-{slot_index}.png",
-            public_url=f"/api/images/local/{message_id}-{slot_index}.png",
+            public_url=f"/api/images/assets/{message_id}-{slot_index}.png",
             mime_type=content_type,
             bytes=len(body),
             sha256="a" * 64,
@@ -88,7 +88,7 @@ class GeneratedAssetsServiceTests(unittest.IsolatedAsyncioTestCase):
             storage=storage,
         )
 
-        self.assertEqual(urls, ["/api/images/local/42-0.png"])
+        self.assertEqual(urls, ["/api/images/assets/42-0.png"])
         self.assertTrue(db.flushed)
         self.assertEqual(storage.saved[0]["body"], b"hello")
         asset = db.added[0]
@@ -97,7 +97,7 @@ class GeneratedAssetsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(asset.message_id, 42)
         self.assertEqual(asset.slot_index, 0)
         self.assertEqual(asset.storage_kind, "local")
-        self.assertEqual(asset.public_url, "/api/images/local/42-0.png")
+        self.assertEqual(asset.public_url, "/api/images/assets/42-0.png")
         self.assertEqual(asset.source_url, "data:image")
         self.assertEqual(asset.status, "available")
 

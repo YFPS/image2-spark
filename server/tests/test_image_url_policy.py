@@ -18,19 +18,19 @@ class ImageUrlPolicyTests(unittest.TestCase):
         urls = [
             "http://67.21.86.146:3015/images/old.png",
             "https://cdn.example.com/images/new.png",
-            "/api/images/local/123-0.png",
+            "/api/images/assets/123-0.png",
         ]
 
         self.assertEqual(
             filter_displayable_image_urls(urls),
             [
                 "https://cdn.example.com/images/new.png",
-                "/api/images/local/123-0.png",
+                "/api/images/assets/123-0.png",
             ],
         )
 
     def test_keeps_relative_and_data_like_urls_displayable(self):
-        self.assertTrue(is_displayable_image_url("/api/images/local/123-0.png"))
+        self.assertTrue(is_displayable_image_url("/api/images/assets/123-0.png"))
         self.assertTrue(is_displayable_image_url("data:image/png;base64,abc"))
 
 

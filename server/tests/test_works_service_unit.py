@@ -18,9 +18,9 @@ class WorksServiceAssetPathTests(unittest.IsolatedAsyncioTestCase):
         item = RecentWorkItem(
             message_id=42,
             conversation_id=8,
-            image_url="/api/images/local/42-0.png",
+            image_url="/api/images/assets/42-0.png",
             image_count=1,
-            all_image_urls=["/api/images/local/42-0.png"],
+            all_image_urls=["/api/images/assets/42-0.png"],
             created_at=datetime.now(UTC),
         )
 

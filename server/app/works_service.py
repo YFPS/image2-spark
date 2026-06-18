@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from sqlalchemy import Select, and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .asset_storage import canonical_image_url
 from .config import get_settings
 from .generated_assets_service import list_user_assets
 from .models import Conversation, Message
@@ -78,7 +79,7 @@ def message_to_recent_work_item(m: Message) -> RecentWorkItem | None:
     若 image_urls 为空列表（DB 层 IS NOT NULL 兜不住 "[]" 这种 JSON 空列表），
     返回 None 让调用方跳过——双保险。
     """
-    urls = filter_displayable_image_urls(m.image_urls)
+    urls = [canonical_image_url(url) for url in filter_displayable_image_urls(m.image_urls)]
     if not urls:
         return None
     size: str | None = None

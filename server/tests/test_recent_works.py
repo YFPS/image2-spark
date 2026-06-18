@@ -219,7 +219,7 @@ class RecentWorksTests(unittest.IsolatedAsyncioTestCase):
             cid,
             role="ai",
             status="done",
-            image_urls=["/api/images/local/live.png"],
+            image_urls=["/api/images/assets/live.png"],
         )
 
         r = await self.client.get("/api/me/recent-works", headers=self._auth(token))
@@ -227,7 +227,7 @@ class RecentWorksTests(unittest.IsolatedAsyncioTestCase):
         items = r.json()["items"]
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["message_id"], good_id)
-        self.assertEqual(items[0]["image_url"], "/api/images/local/live.png")
+        self.assertEqual(items[0]["image_url"], "/api/images/assets/live.png")
 
     async def test_scans_past_broken_latest_history_images(self):
         """最新一批历史坏图被过滤后，继续向后找仍可展示的作品。"""
@@ -237,7 +237,7 @@ class RecentWorksTests(unittest.IsolatedAsyncioTestCase):
             cid,
             role="ai",
             status="done",
-            image_urls=["/api/images/local/older-live.png"],
+            image_urls=["/api/images/assets/older-live.png"],
         )
         for i in range(15):
             await self._add_msg(
@@ -252,7 +252,7 @@ class RecentWorksTests(unittest.IsolatedAsyncioTestCase):
         items = r.json()["items"]
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["message_id"], good_id)
-        self.assertEqual(items[0]["image_url"], "/api/images/local/older-live.png")
+        self.assertEqual(items[0]["image_url"], "/api/images/assets/older-live.png")
 
     async def test_conversation_detail_replaces_known_broken_images_with_message(self):
         """会话详情不把坏 URL 交给前端反复尝试加载。"""

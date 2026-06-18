@@ -40,7 +40,7 @@ class GeneratedAssetsMigrationTests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_persist(db, **kwargs):
             calls.append(kwargs)
-            return ["/api/images/local/42-0.png"]
+            return ["/api/images/assets/42-0.png"]
 
         with (
             patch.object(migration, "load_existing_slot_indexes", return_value=set()),

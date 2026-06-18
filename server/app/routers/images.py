@@ -37,6 +37,7 @@ from sqlalchemy import and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
+from ..asset_storage import generated_image_public_url
 from ..db import get_db, get_session_factory
 from ..deps import get_current_user
 from ..audit_service import InsufficientCreditsError, apply_credit_delta
@@ -306,7 +307,7 @@ async def _write_generated_image(
     if root not in path.parents:
         raise ValueError("生成图片路径越界")
     await asyncio.to_thread(path.write_bytes, body)
-    return f"/api/images/local/{filename}"
+    return generated_image_public_url(filename)
 
 
 async def _download_generated_image(src: str, output_format: str) -> tuple[bytes, str]:
@@ -817,9 +818,10 @@ async def edit(
 # ===== proxy-image / segment / brush-cutout =====
 
 
+@router.get("/assets/{filename}")
 @router.get("/local/{filename}")
-async def local_generated_image(filename: str) -> Response:
-    """读取已本地化的生成图片。"""
+async def generated_image_asset(filename: str) -> Response:
+    """读取已保存的生成图片；/local 路径仅保留旧链接兼容。"""
     if "/" in filename or "\\" in filename or filename in {"", ".", ".."}:
         return JSONResponse(
             status_code=400,

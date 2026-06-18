@@ -233,19 +233,19 @@ class WorksTests(unittest.IsolatedAsyncioTestCase):
         uid, token = await self._register_and_login()
         cid = await self._create_conv(uid)
         await self._add_msg(cid, image_urls=["http://67.21.86.146:3015/images/dead.png"])
-        good_id = await self._add_msg(cid, image_urls=["/api/images/local/live.png"])
+        good_id = await self._add_msg(cid, image_urls=["/api/images/assets/live.png"])
 
         r = await self.client.get("/api/me/works", headers=self._auth(token))
         self.assertEqual(r.status_code, 200, r.text)
         items = r.json()["items"]
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["message_id"], good_id)
-        self.assertEqual(items[0]["image_url"], "/api/images/local/live.png")
+        self.assertEqual(items[0]["image_url"], "/api/images/assets/live.png")
 
     async def test_scans_past_broken_latest_history_images(self):
         uid, token = await self._register_and_login()
         cid = await self._create_conv(uid)
-        good_id = await self._add_msg(cid, image_urls=["/api/images/local/older-live.png"])
+        good_id = await self._add_msg(cid, image_urls=["/api/images/assets/older-live.png"])
         for i in range(15):
             await self._add_msg(
                 cid,
@@ -257,7 +257,7 @@ class WorksTests(unittest.IsolatedAsyncioTestCase):
         items = r.json()["items"]
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["message_id"], good_id)
-        self.assertEqual(items[0]["image_url"], "/api/images/local/older-live.png")
+        self.assertEqual(items[0]["image_url"], "/api/images/assets/older-live.png")
 
     async def test_excludes_soft_deleted_conv(self):
         uid, token = await self._register_and_login()

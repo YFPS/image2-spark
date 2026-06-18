@@ -13,7 +13,7 @@ import httpx
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .asset_storage import AssetStorage, get_asset_storage
+from .asset_storage import AssetStorage, canonical_image_url, get_asset_storage
 from .config import get_settings
 from .models import GeneratedAsset
 from .schemas import RecentWorkItem
@@ -123,12 +123,13 @@ async def persist_generated_assets(
 def asset_to_recent_work_item(asset: GeneratedAsset) -> RecentWorkItem | None:
     if asset.status != "available" or not asset.public_url:
         return None
+    public_url = canonical_image_url(asset.public_url)
     return RecentWorkItem(
         message_id=asset.message_id,
         conversation_id=asset.conversation_id,
-        image_url=asset.public_url,
+        image_url=public_url,
         image_count=1,
-        all_image_urls=[asset.public_url],
+        all_image_urls=[public_url],
         size=None,
         created_at=asset.created_at,
     )

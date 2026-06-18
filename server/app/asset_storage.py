@@ -15,6 +15,9 @@ from typing import Protocol
 
 from .config import get_settings
 
+GENERATED_IMAGE_ASSET_PREFIX = "/api/images/assets"
+LEGACY_GENERATED_IMAGE_PREFIX = "/api/images/local"
+
 
 @dataclass(frozen=True)
 class StoredAsset:
@@ -54,6 +57,16 @@ def image_ext(content_type: str, output_format: str) -> str:
     return f".{fallback}"
 
 
+def generated_image_public_url(filename: str) -> str:
+    return f"{GENERATED_IMAGE_ASSET_PREFIX}/{filename}"
+
+
+def canonical_image_url(url: str) -> str:
+    if url.startswith(f"{LEGACY_GENERATED_IMAGE_PREFIX}/"):
+        return f"{GENERATED_IMAGE_ASSET_PREFIX}/{url.rsplit('/', 1)[-1]}"
+    return url
+
+
 class LocalAssetStorage:
     def __init__(self, root: str | None = None) -> None:
         settings = get_settings()
@@ -84,7 +97,7 @@ class LocalAssetStorage:
         return StoredAsset(
             storage_kind="local",
             storage_key=filename,
-            public_url=f"/api/images/local/{filename}",
+            public_url=generated_image_public_url(filename),
             mime_type=mime_type,
             bytes=len(body),
             sha256=sha256,
