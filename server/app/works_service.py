@@ -12,6 +12,7 @@ from sqlalchemy import Select, and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import get_settings
+from .generated_assets_service import list_user_assets
 from .models import Conversation, Message
 from .schemas import RecentWorkItem
 
@@ -105,11 +106,23 @@ async def fetch_recent_work_items(
 ) -> tuple[list[RecentWorkItem], int | None]:
     """按用户查询可展示作品，避免 MySQL 对跨表结果做全局 filesort。
 
+    长期路径优先读取 generated_assets；迁移期只有当第一页完全没有资产记录时，
+    才回退到旧 Message 扫描。cursor 模式下不回退，避免把 asset_id 当 message_id 使用。
+
     线上 RDS 在 `messages JOIN conversations ORDER BY messages.id DESC LIMIT N`
     上会触发 1038 sort buffer 错误。这里先用 conversations 的用户索引分批取
     会话，再按单个 conversation_id 走 `idx_msg_conv_id` 倒序扫描消息，最后在
     Python 合并少量候选项。
     """
+    asset_items, asset_next_cursor = await list_user_assets(
+        db,
+        user_id,
+        cursor=cursor,
+        limit=limit,
+    )
+    if asset_items or cursor is not None:
+        return asset_items, asset_next_cursor
+
     target = limit + 1
     candidates: list[RecentWorkItem] = []
     conv_cursor: tuple[object, int] | None = None
