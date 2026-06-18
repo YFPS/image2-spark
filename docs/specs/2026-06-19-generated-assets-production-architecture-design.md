@@ -394,7 +394,20 @@ Chrome MCP 验证最新作品图片真实渲染
 
 ---
 
-## 十、风险与取舍
+## 十、迁移执行记录
+
+- **执行时间**：2026-06-19
+- **环境**：本地开发环境连接当前 `server/.env` 配置的 MySQL
+- **Alembic**：`0005 -> 0006`，当前 `0006 (head)`
+- **dry-run 第一次**：`planned=144 created=0 missing=133 skipped=0 failed=0`
+- **真实迁移**：`planned=144 created=144 missing=133 skipped=0 failed=0`
+- **dry-run 复查**：`planned=0 created=0 missing=0 skipped=144 failed=0`
+- **资产统计**：`total=144 available=11 missing=133 local=11 remote_legacy=0`
+- **说明**：133 条历史图片来自已知失效旧图源，迁移为 `missing`，不会再进入作品列表展示；11 条可恢复图片已保存为本地资产 URL。
+
+---
+
+## 十一、风险与取舍
 
 1. **短期双写复杂度增加**  
    代价是写路径多一步资产记录；收益是读路径稳定、图片可靠性可观测。
