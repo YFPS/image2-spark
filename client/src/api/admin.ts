@@ -1,4 +1,5 @@
 import { authFetch } from "./auth";
+import type { ConversationDetail, ConversationListItem } from "./conversations";
 
 const BASE = "/api/admin";
 
@@ -106,6 +107,62 @@ export type UpstreamHealth = {
 
 export type Paged<T> = { items: T[]; total: number; page: number; page_size: number };
 
+export type AdminDataTableKey =
+  | "conversations"
+  | "messages"
+  | "credit_transactions"
+  | "email_verification_tokens"
+  | "generated_assets";
+
+export type AdminDataTableMeta = {
+  key: AdminDataTableKey;
+  label: string;
+  columns: string[];
+};
+
+export type AdminUserSummary = {
+  id: number;
+  email: string;
+  nickname: string;
+  role: string;
+};
+
+export type AdminDataTableRow = Record<string, unknown> & {
+  _user: AdminUserSummary | null;
+  _conversation_id: number | null;
+};
+
+export type AdminDataTablePage = Paged<AdminDataTableRow> & {
+  table: AdminDataTableKey;
+  label: string;
+  columns: string[];
+};
+
+export type AdminConversationListItem = ConversationListItem & {
+  deleted_at: string | null;
+};
+
+export type AdminConversationDetail = ConversationDetail & {
+  deleted_at: string | null;
+};
+
+export type AdminImageAsset = {
+  id: number;
+  user_id: number;
+  conversation_id: number;
+  message_id: number;
+  slot_index: number;
+  image_url: string | null;
+  storage_kind: string;
+  status: string;
+  width: number | null;
+  height: number | null;
+  bytes: number | null;
+  created_at: string;
+  updated_at: string;
+  _user: AdminUserSummary | null;
+};
+
 // ===== Dashboard =====
 export const getDashboard = () => api<DashboardStats>("/dashboard");
 
@@ -162,16 +219,47 @@ export const getDAU = (days?: number) => api<DAUItem[]>(`/stats/dau?days=${days 
 export const getTraffic = () => api<TrafficStats>("/stats/traffic");
 
 // ===== Images =====
-export const getImages = (p: { page?: number; user_id?: number }) => {
+export const getImages = (p: { page?: number; user_id?: number; status?: string }) => {
   const q = new URLSearchParams();
   if (p.page) q.set("page", String(p.page));
   if (p.user_id) q.set("user_id", String(p.user_id));
-  return api<Paged<{ id: number; conversation_id: number; user_id: number | null; image_urls: string[] | null; status: string; created_at: string }>>(
-    `/images?${q}`,
-  );
+  if (p.status) q.set("status", p.status);
+  return api<Paged<AdminImageAsset>>(`/images?${q}`);
 };
 
 export const deleteImage = (id: number) => api<{ ok: boolean }>(`/images/${id}`, { method: "DELETE" });
+
+// ===== Data Tables =====
+export const getAdminDataTables = () => api<AdminDataTableMeta[]>("/data-tables");
+
+export const getAdminDataTable = (
+  table: AdminDataTableKey,
+  p: {
+    page?: number;
+    page_size?: number;
+    search?: string;
+    user_id?: number;
+    conversation_id?: number;
+    message_id?: number;
+    status?: string;
+  } = {},
+) => {
+  const q = new URLSearchParams();
+  if (p.page) q.set("page", String(p.page));
+  if (p.page_size) q.set("page_size", String(p.page_size));
+  if (p.search) q.set("search", p.search);
+  if (p.user_id != null) q.set("user_id", String(p.user_id));
+  if (p.conversation_id != null) q.set("conversation_id", String(p.conversation_id));
+  if (p.message_id != null) q.set("message_id", String(p.message_id));
+  if (p.status) q.set("status", p.status);
+  return api<AdminDataTablePage>(`/data-tables/${table}?${q}`);
+};
+
+export const getAdminUserConversations = (userId: number) =>
+  api<AdminConversationListItem[]>(`/users/${userId}/conversations`);
+
+export const getAdminConversation = (conversationId: number) =>
+  api<AdminConversationDetail>(`/conversations/${conversationId}`);
 
 // ===== Upstreams =====
 export const getUpstreams = () => api<UpstreamChannel[]>("/upstreams");

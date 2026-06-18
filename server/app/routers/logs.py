@@ -10,6 +10,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
+from ..customer_text import sanitize_customer_note_text
 from ..deps import get_current_user
 from ..models import CreditTransaction, Message, User
 from ..schemas import LogItem, LogRef, LogsPage
@@ -81,7 +82,7 @@ async def list_logs(
                 type=tx.reason,
                 delta=tx.delta,
                 balance_after=tx.balance_after,
-                note=tx.note,
+                note=sanitize_customer_note_text(tx.note),
                 created_at=tx.created_at,
                 ref=ref,
             )

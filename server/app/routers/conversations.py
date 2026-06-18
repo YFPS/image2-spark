@@ -13,6 +13,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from ..customer_text import sanitize_customer_message_text
 from ..db import get_db
 from ..deps import get_current_user
 from ..models import Conversation, Message, User
@@ -52,7 +53,7 @@ def _to_msg_out(m: Message) -> MessageOut:
     return MessageOut(
         id=m.id,
         role=m.role,
-        text=text,
+        text=sanitize_customer_message_text(text, m.role),
         image_urls=image_urls or None,
         params=m.params,
         status=getattr(m, "status", "done"),

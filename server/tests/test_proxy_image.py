@@ -1,3 +1,4 @@
+import json
 import types
 import unittest
 from unittest import mock
@@ -56,6 +57,11 @@ class ProxyImageTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsInstance(response, JSONResponse)
         self.assertEqual(response.status_code, 504)
+        body = json.loads(response.body)
+        self.assertEqual(body["error"]["code"], "image_fetch_timeout")
+        self.assertEqual(body["error"]["message"], "图片加载超时，请稍后重试")
+        self.assertNotIn("upstream", body["error"]["code"])
+        self.assertNotIn("上游", body["error"]["message"])
 
 
 if __name__ == "__main__":

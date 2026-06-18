@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.asset_storage import LocalAssetStorage, StoredAsset
-from app.generated_assets_service import persist_generated_assets
+from app.generated_assets_service import asset_rows_to_recent_work_items, persist_generated_assets
 
 
 class LocalAssetStorageTests(unittest.IsolatedAsyncioTestCase):
@@ -74,6 +76,50 @@ class FakeStorage:
 
 
 class GeneratedAssetsServiceTests(unittest.IsolatedAsyncioTestCase):
+    def test_asset_rows_use_message_created_at_for_recent_work_time(self):
+        message_time = datetime(2026, 5, 23, 10, 57, 48)
+        asset_backfill_time = datetime(2026, 6, 19, 1, 50, 49)
+        message = SimpleNamespace(
+            id=3094,
+            conversation_id=292,
+            params={"size": "1024x1024"},
+            created_at=message_time,
+        )
+        rows = [
+            (
+                SimpleNamespace(
+                    message_id=3094,
+                    slot_index=0,
+                    public_url="/api/images/assets/3094-0.png",
+                    status="available",
+                    created_at=asset_backfill_time,
+                ),
+                message,
+            ),
+            (
+                SimpleNamespace(
+                    message_id=3094,
+                    slot_index=1,
+                    public_url="/api/images/assets/3094-1.png",
+                    status="available",
+                    created_at=asset_backfill_time,
+                ),
+                message,
+            ),
+        ]
+
+        items = asset_rows_to_recent_work_items(rows, limit=12)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].message_id, 3094)
+        self.assertEqual(items[0].image_count, 2)
+        self.assertEqual(
+            items[0].all_image_urls,
+            ["/api/images/assets/3094-0.png", "/api/images/assets/3094-1.png"],
+        )
+        self.assertEqual(items[0].size, "1024x1024")
+        self.assertEqual(items[0].created_at, message_time)
+
     async def test_persist_generated_assets_writes_asset_and_returns_public_url(self):
         db = FakeDb()
         storage = FakeStorage()

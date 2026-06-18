@@ -42,6 +42,50 @@ export type ApiError = {
   upstream_status?: number;
 };
 
+const INTERNAL_ERROR_MARKERS = [
+  "OPENAI",
+  "API_KEY",
+  "BASE_URL",
+  "UPSTREAM",
+  "upstream_error",
+  "upstream_timeout",
+  "上游",
+  "KEY",
+];
+
+export function customerErrorMessage(
+  apiError: ApiError,
+  fallback = "生成服务暂时不可用，请稍后再试",
+): string {
+  const code = apiError.code || "";
+  const message = apiError.message || "";
+  const combined = `${code} ${message}`;
+  const upper = combined.toUpperCase();
+
+  if (code === "email_not_verified") return message || "请先验证邮箱后再继续";
+  if (code === "rate_limited") return message || "操作过于频繁，请稍后再试";
+  if (code === "validation_error") return message || "参数有误，请调整后重试";
+  if (code === "image_fetch_timeout") return "图片加载超时，请稍后重试";
+  if (code === "image_fetch_failed") return "图片加载失败，请稍后重试";
+  if (code === "model_error") return "图片处理失败，请稍后重试";
+  if (upper.includes("HTTP ")) return fallback;
+
+  if (INTERNAL_ERROR_MARKERS.some((marker) => upper.includes(marker.toUpperCase()))) {
+    return fallback;
+  }
+  return message || fallback;
+}
+
+function withCustomerMessage(
+  apiError: ApiError,
+  fallback?: string,
+): ApiError {
+  return {
+    ...apiError,
+    message: customerErrorMessage(apiError, fallback),
+  };
+}
+
 export class GenerateError extends Error {
   apiError: ApiError;
   constructor(apiError: ApiError) {
@@ -92,7 +136,7 @@ export async function generateImages(
     if (apiError.code === "email_not_verified") {
       apiError.message = "请先验证邮箱后再生成图片";
     }
-    throw new GenerateError(apiError);
+    throw new GenerateError(withCustomerMessage(apiError));
   }
 
   return (await res.json()) as MessageOut;
@@ -176,7 +220,7 @@ export async function editImage(
     if (apiError.code === "email_not_verified") {
       apiError.message = "请先验证邮箱后再修改图片";
     }
-    throw new GenerateError(apiError);
+    throw new GenerateError(withCustomerMessage(apiError));
   }
   return (await res.json()) as MessageOut;
 }
@@ -209,7 +253,7 @@ export async function brushCutout(req: {
     if (res.status === 429 && !apiError.message) {
       apiError = { code: "rate_limited", message: "操作过于频繁，请稍后再试" };
     }
-    throw new GenerateError(apiError);
+    throw new GenerateError(withCustomerMessage(apiError, "图片处理失败，请稍后重试"));
   }
   return await res.blob();
 }
@@ -234,7 +278,7 @@ export async function segmentImage(req: SegmentRequest): Promise<Blob> {
     if (res.status === 429 && !apiError.message) {
       apiError = { code: "rate_limited", message: "操作过于频繁，请稍后再试" };
     }
-    throw new GenerateError(apiError);
+    throw new GenerateError(withCustomerMessage(apiError, "图片处理失败，请稍后重试"));
   }
   return await res.blob();
 }

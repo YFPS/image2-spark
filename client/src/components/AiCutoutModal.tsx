@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { brushCutout, GenerateError } from "../api/gptImage";
+import { brushCutout, GenerateError, customerErrorMessage } from "../api/gptImage";
 
 /**
  * AI 抠图：用户涂粗略区域 → 后端 MobileSAM 沿真实主体边缘精化 → 返回 RGBA PNG。
@@ -190,7 +190,7 @@ export function AiCutoutModal({
     } catch (e) {
       const msg =
         e instanceof GenerateError
-          ? `${e.apiError.code}：${e.apiError.message}`
+          ? customerErrorMessage(e.apiError, "图片处理失败，请稍后重试")
           : e instanceof Error
             ? e.message
             : String(e);

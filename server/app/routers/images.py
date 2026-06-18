@@ -38,6 +38,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
 from ..asset_storage import generated_image_public_url
+from ..customer_text import (
+    customer_failure_text,
+    sanitize_customer_message_text,
+    sanitize_customer_note_text,
+)
 from ..db import get_db, get_session_factory
 from ..deps import get_current_user
 from ..audit_service import InsufficientCreditsError, apply_credit_delta
@@ -144,7 +149,7 @@ async def _refund_credits(
                 reason="refund",
                 ref_type="message",
                 ref_id=str(ai_msg_id),
-                note=f"生图失败退款：{fail_reason}",
+                note=sanitize_customer_note_text(f"生图失败退款：{fail_reason}"),
             )
             await db.commit()
         except Exception:  # noqa: BLE001
@@ -170,12 +175,16 @@ def _to_msg_out(m: Message) -> MessageOut:
     return MessageOut(
         id=m.id,
         role=m.role,
-        text=m.text,
+        text=sanitize_customer_message_text(m.text, m.role),
         image_urls=m.image_urls,
         params=m.params,
         status=m.status,
         created_at=m.created_at,
     )
+
+
+def _customer_failure_text(exc: Exception) -> str:
+    return customer_failure_text(exc)
 
 
 async def _load_owned_conv(db: AsyncSession, user_id: int, conv_id: int) -> Conversation:
@@ -494,7 +503,7 @@ async def _run_generate_task(
         upstream_json = await call_images_generate(payload, attempts=attempts)
     except UpstreamTimeout as e:
         await _finalize_message(
-            factory, ai_msg_id, conv_id, ok=False, text=f"失败：上游超时 ({e})"
+            factory, ai_msg_id, conv_id, ok=False, text=customer_failure_text(e)
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"上游超时 ({e})")
         await _record_upstream_outcome(
@@ -511,7 +520,7 @@ async def _run_generate_task(
     except UpstreamError as e:
         await _finalize_message(
             factory, ai_msg_id, conv_id, ok=False,
-            text=f"失败：upstream_error：{e}",
+            text=customer_failure_text(e),
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"upstream_error: {e}")
         await _record_upstream_outcome(
@@ -528,7 +537,7 @@ async def _run_generate_task(
     except Exception as e:  # noqa: BLE001
         logger.exception("generate task 异常 ai_msg_id=%s", ai_msg_id)
         await _finalize_message(
-            factory, ai_msg_id, conv_id, ok=False, text=f"失败：{e}"
+            factory, ai_msg_id, conv_id, ok=False, text=customer_failure_text(e)
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"task 异常: {e}")
         await _record_upstream_outcome(
@@ -554,7 +563,7 @@ async def _run_generate_task(
     if returned == 0:
         await _finalize_message(
             factory, ai_msg_id, conv_id, ok=False,
-            text=f"失败：上游未返回任何图片（usage {usage['total_tokens']} tokens）",
+            text=f"失败：生成服务未返回图片（usage {usage['total_tokens']} tokens）",
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, "上游 data=[] 未返回图片")
         await _record_upstream_outcome(
@@ -692,7 +701,7 @@ async def _run_edit_task(
         upstream_json = await call_images_edit(fields, files, force_backup=force_backup, attempts=attempts)
     except UpstreamTimeout as e:
         await _finalize_message(
-            factory, ai_msg_id, conv_id, ok=False, text=f"失败：上游超时 ({e})"
+            factory, ai_msg_id, conv_id, ok=False, text=customer_failure_text(e)
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"上游超时 ({e})")
         await _record_upstream_outcome(
@@ -709,7 +718,7 @@ async def _run_edit_task(
     except UpstreamError as e:
         await _finalize_message(
             factory, ai_msg_id, conv_id, ok=False,
-            text=f"失败：upstream_error：{e}",
+            text=customer_failure_text(e),
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"upstream_error: {e}")
         await _record_upstream_outcome(
@@ -726,7 +735,7 @@ async def _run_edit_task(
     except Exception as e:  # noqa: BLE001
         logger.exception("edit task 异常 ai_msg_id=%s", ai_msg_id)
         await _finalize_message(
-            factory, ai_msg_id, conv_id, ok=False, text=f"失败：{e}"
+            factory, ai_msg_id, conv_id, ok=False, text=customer_failure_text(e)
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, f"task 异常: {e}")
         await _record_upstream_outcome(
@@ -752,7 +761,7 @@ async def _run_edit_task(
     if returned == 0:
         await _finalize_message(
             factory, ai_msg_id, conv_id, ok=False,
-            text=f"失败：上游未返回任何图片（usage {usage['total_tokens']} tokens）",
+            text=f"失败：生成服务未返回图片（usage {usage['total_tokens']} tokens）",
         )
         await _refund_credits(factory, user_id, ai_msg_id, cost, "上游 data=[] 未返回图片")
         await _record_upstream_outcome(
@@ -780,9 +789,9 @@ async def _run_edit_task(
     if missing > 0:
         text += f"（请求 {requested} 张，已退 {missing} 积分）"
     if dropped_refs > 0:
-        text += f"（已忽略 {dropped_refs} 张副参考图，当前上游仅支持单图）"
+        text += f"（已忽略 {dropped_refs} 张副参考图，当前仅支持单图）"
     if force_backup:
-        text += "（多图模式，已自动切换备用上游）"
+        text += "（多图模式，已自动切换兼容模式）"
     urls = await _persist_generated_assets_for_message(
         factory,
         urls,
@@ -976,7 +985,7 @@ async def generated_image_asset(filename: str) -> Response:
 @router.get("/proxy-image")
 async def proxy_image(
     request: Request,
-    url: str = Query(..., description="上游图片 URL"),
+    url: str = Query(..., description="图片 URL"),
 ) -> Response:
     """反代上游 CDN 图片，规避前端 canvas 跨域 taint。
 
@@ -1041,15 +1050,17 @@ async def proxy_image(
         up_resp = await client.send(req, stream=True)
     except httpx.TimeoutException as e:
         await client.aclose()
+        logger.warning("proxy-image 拉取图片超时 url=%s error=%s", url, e)
         return JSONResponse(
             status_code=504,
-            content={"error": {"code": "upstream_timeout", "message": f"拉取图片超时：{e}"}},
+            content={"error": {"code": "image_fetch_timeout", "message": "图片加载超时，请稍后重试"}},
         )
     except httpx.HTTPError as e:
         await client.aclose()
+        logger.warning("proxy-image 拉取图片失败 url=%s error=%s", url, e)
         return JSONResponse(
             status_code=502,
-            content={"error": {"code": "upstream_error", "message": f"拉取图片失败：{e}"}},
+            content={"error": {"code": "image_fetch_failed", "message": "图片加载失败，请稍后重试"}},
         )
 
     if up_resp.status_code >= 400:
@@ -1059,9 +1070,8 @@ async def proxy_image(
             status_code=502,
             content={
                 "error": {
-                    "code": "upstream_error",
-                    "message": f"上游图片返回 HTTP {up_resp.status_code}",
-                    "upstream_status": up_resp.status_code,
+                    "code": "image_fetch_failed",
+                    "message": "图片源暂时不可用，请稍后重试",
                 },
             },
         )
@@ -1137,10 +1147,17 @@ async def segment(
             status_code=400,
             content={"error": {"code": "validation_error", "message": str(e)}},
         )
-    except (httpx.TimeoutException, httpx.HTTPError) as e:
+    except httpx.TimeoutException as e:
+        logger.warning("segment 拉取图片超时 url=%s error=%s", req.url, e)
+        return JSONResponse(
+            status_code=504,
+            content={"error": {"code": "image_fetch_timeout", "message": "图片加载超时，请稍后重试"}},
+        )
+    except httpx.HTTPError as e:
+        logger.warning("segment 拉取图片失败 url=%s error=%s", req.url, e)
         return JSONResponse(
             status_code=502,
-            content={"error": {"code": "upstream_error", "message": f"拉取图片失败：{e}"}},
+            content={"error": {"code": "image_fetch_failed", "message": "图片加载失败，请稍后重试"}},
         )
 
     try:
@@ -1153,9 +1170,10 @@ async def segment(
             content={"error": {"code": "validation_error", "message": str(e)}},
         )
     except Exception as e:  # noqa: BLE001
+        logger.exception("segment 失败")
         return JSONResponse(
             status_code=500,
-            content={"error": {"code": "model_error", "message": f"抠图失败：{e}"}},
+            content={"error": {"code": "model_error", "message": "图片处理失败，请稍后重试"}},
         )
 
     return Response(content=png_bytes, media_type="image/png")
@@ -1205,7 +1223,7 @@ async def brush_cutout(
         logger.exception("brush-cutout 失败")
         return JSONResponse(
             status_code=500,
-            content={"error": {"code": "model_error", "message": f"抠图失败：{e}"}},
+            content={"error": {"code": "model_error", "message": "图片处理失败，请稍后重试"}},
         )
     return Response(content=png_bytes, media_type="image/png")
 

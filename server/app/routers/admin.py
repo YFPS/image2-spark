@@ -7,8 +7,9 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import and_, delete, func, not_, select, text, update
+from sqlalchemy import and_, delete, func, not_, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from ..admin_schemas import (
     AdminAuditLogItem,
@@ -32,6 +33,7 @@ from ..admin_schemas import (
 from ..audit_service import apply_credit_delta, set_user_credits
 from ..config import get_settings
 from ..crypto import decrypt_api_key, encrypt_api_key, is_encryption_configured
+from ..customer_text import sanitize_customer_message_text
 from ..db import get_db
 from ..deps import require_admin
 from ..models import (
@@ -40,6 +42,8 @@ from ..models import (
     AuditLog,
     Conversation,
     CreditTransaction,
+    EmailVerificationToken,
+    GeneratedAsset,
     Message,
     UpstreamChannel,
     UpstreamRequestLog,
@@ -47,12 +51,81 @@ from ..models import (
 )
 from ..schemas import MessageOut
 from ..upstream_monitoring import UpstreamAttempt, summarize_upstream_metrics
+from ..works_service import filter_displayable_image_urls
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 _INTERNAL_ACCESS_PATHS = {"/api/health", "/docs", "/openapi.json", "/redoc"}
 _INTERNAL_ACCESS_PREFIXES = ("/api/admin", "/static")
+
+
+ADMIN_DATA_TABLES: dict[str, dict[str, Any]] = {
+    "conversations": {
+        "label": "会话",
+        "model": Conversation,
+        "columns": ["id", "user_id", "title", "pinned", "created_at", "updated_at", "deleted_at"],
+        "search_columns": [Conversation.title],
+        "filter_columns": {"user_id": Conversation.user_id},
+    },
+    "messages": {
+        "label": "消息",
+        "model": Message,
+        "columns": ["id", "conversation_id", "role", "text", "image_urls", "params", "status", "created_at"],
+        "search_columns": [Message.text, Message.status, Message.role],
+        "filter_columns": {
+            "conversation_id": Message.conversation_id,
+            "status": Message.status,
+        },
+    },
+    "credit_transactions": {
+        "label": "积分流水",
+        "model": CreditTransaction,
+        "columns": [
+            "id", "user_id", "delta", "balance_after", "reason",
+            "ref_type", "ref_id", "note", "created_at",
+        ],
+        "search_columns": [
+            CreditTransaction.reason,
+            CreditTransaction.ref_type,
+            CreditTransaction.ref_id,
+            CreditTransaction.note,
+        ],
+        "filter_columns": {"user_id": CreditTransaction.user_id},
+    },
+    "email_verification_tokens": {
+        "label": "邮箱验证",
+        "model": EmailVerificationToken,
+        "columns": ["id", "user_id", "token_hash", "purpose", "expires_at", "used_at", "created_at"],
+        "search_columns": [EmailVerificationToken.purpose, EmailVerificationToken.token_hash],
+        "filter_columns": {"user_id": EmailVerificationToken.user_id},
+    },
+    "generated_assets": {
+        "label": "生成资产",
+        "model": GeneratedAsset,
+        "columns": [
+            "id", "user_id", "conversation_id", "message_id", "slot_index",
+            "storage_kind", "storage_key", "public_url", "source_url",
+            "mime_type", "width", "height", "bytes", "sha256",
+            "status", "created_at", "updated_at",
+        ],
+        "search_columns": [
+            GeneratedAsset.storage_kind,
+            GeneratedAsset.storage_key,
+            GeneratedAsset.public_url,
+            GeneratedAsset.source_url,
+            GeneratedAsset.mime_type,
+            GeneratedAsset.sha256,
+            GeneratedAsset.status,
+        ],
+        "filter_columns": {
+            "user_id": GeneratedAsset.user_id,
+            "conversation_id": GeneratedAsset.conversation_id,
+            "message_id": GeneratedAsset.message_id,
+            "status": GeneratedAsset.status,
+        },
+    },
+}
 
 
 def _matches_path_prefix(path: str, prefix: str) -> bool:
@@ -87,6 +160,145 @@ def _client_ip(request: Request) -> str | None:
     if forwarded:
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else None
+
+
+def _mask_hash(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if len(value) <= 16:
+        return "****"
+    return f"{value[:8]}...{value[-6:]}"
+
+
+def _json_safe_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def _serialize_admin_data_table_row(table_key: str, row: Any) -> dict[str, Any]:
+    cfg = ADMIN_DATA_TABLES[table_key]
+    data: dict[str, Any] = {}
+    for col in cfg["columns"]:
+        value = getattr(row, col)
+        if table_key == "email_verification_tokens" and col == "token_hash":
+            value = _mask_hash(value)
+        data[col] = _json_safe_value(value)
+    return data
+
+
+def _row_conversation_id(
+    table_key: str,
+    row: Any,
+    message_conversation_ids: dict[int, int] | None = None,
+) -> int | None:
+    if table_key == "conversations":
+        return getattr(row, "id", None)
+    if table_key in {"messages", "generated_assets"}:
+        return getattr(row, "conversation_id", None)
+    if table_key == "credit_transactions":
+        ref_type = getattr(row, "ref_type", None)
+        ref_id = getattr(row, "ref_id", None)
+        if ref_type == "message" and ref_id is not None and str(ref_id).isdigit():
+            return (message_conversation_ids or {}).get(int(ref_id))
+    return None
+
+
+def _serialize_admin_user_summary(user: User | None) -> dict[str, Any] | None:
+    if user is None:
+        return None
+    return {
+        "id": user.id,
+        "email": user.email,
+        "nickname": user.nickname,
+        "role": user.role,
+    }
+
+
+def _serialize_admin_data_table_item(
+    table_key: str,
+    row: Any,
+    user: User | None,
+    message_conversation_ids: dict[int, int] | None = None,
+) -> dict[str, Any]:
+    data = _serialize_admin_data_table_row(table_key, row)
+    data["_user"] = _serialize_admin_user_summary(user)
+    data["_conversation_id"] = _row_conversation_id(table_key, row, message_conversation_ids)
+    return data
+
+
+async def _load_credit_message_conversation_ids(
+    db: AsyncSession,
+    table_key: str,
+    rows: list[Any],
+) -> dict[int, int]:
+    if table_key != "credit_transactions":
+        return {}
+    message_ids = {
+        int(row.ref_id)
+        for row in rows
+        if getattr(row, "ref_type", None) == "message"
+        and getattr(row, "ref_id", None) is not None
+        and str(row.ref_id).isdigit()
+    }
+    if not message_ids:
+        return {}
+    pairs = (await db.execute(
+        select(Message.id, Message.conversation_id).where(Message.id.in_(message_ids))
+    )).all()
+    return {int(row.id): int(row.conversation_id) for row in pairs}
+
+
+async def _load_admin_data_table_users_by_row_id(
+    db: AsyncSession,
+    table_key: str,
+    rows: list[Any],
+) -> dict[int, User | None]:
+    if not rows:
+        return {}
+
+    row_user_ids: dict[int, int] = {}
+    if table_key == "messages":
+        conv_ids = [row.conversation_id for row in rows]
+        conv_rows = (await db.execute(
+            select(Conversation.id, Conversation.user_id).where(Conversation.id.in_(conv_ids))
+        )).all()
+        user_id_by_conv_id = {r.id: r.user_id for r in conv_rows}
+        row_user_ids = {
+            row.id: user_id_by_conv_id[row.conversation_id]
+            for row in rows
+            if row.conversation_id in user_id_by_conv_id
+        }
+    else:
+        row_user_ids = {
+            row.id: row.user_id
+            for row in rows
+            if getattr(row, "user_id", None) is not None
+        }
+
+    if not row_user_ids:
+        return {row.id: None for row in rows}
+
+    users = (await db.execute(
+        select(User).where(User.id.in_(set(row_user_ids.values())))
+    )).scalars().all()
+    user_by_id = {u.id: u for u in users}
+    return {
+        row.id: user_by_id.get(row_user_ids.get(row.id))
+        for row in rows
+    }
+
+
+def _admin_data_table_search_clause(table_key: str, search: str):
+    cfg = ADMIN_DATA_TABLES[table_key]
+    clauses = [col.like(f"%{search}%") for col in cfg["search_columns"]]
+    if search.isdigit():
+        value = int(search)
+        model = cfg["model"]
+        for col_name in ("id", "user_id", "conversation_id", "message_id"):
+            if hasattr(model, col_name):
+                clauses.append(getattr(model, col_name) == value)
+    return or_(*clauses)
 
 
 async def _write_admin_log(
@@ -552,6 +764,25 @@ async def traffic_stats(
 # ===== 图片管理 =====
 
 
+def _serialize_admin_image_asset_item(asset: GeneratedAsset, user: User | None) -> dict[str, Any]:
+    return {
+        "id": asset.id,
+        "user_id": asset.user_id,
+        "conversation_id": asset.conversation_id,
+        "message_id": asset.message_id,
+        "slot_index": asset.slot_index,
+        "image_url": asset.public_url if asset.status == "available" else None,
+        "storage_kind": asset.storage_kind,
+        "status": asset.status,
+        "width": asset.width,
+        "height": asset.height,
+        "bytes": asset.bytes,
+        "created_at": asset.created_at,
+        "updated_at": asset.updated_at,
+        "_user": _serialize_admin_user_summary(user),
+    }
+
+
 @router.get("/images")
 async def list_images(
     admin: User = Depends(require_admin),
@@ -559,54 +790,255 @@ async def list_images(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     user_id: int | None = Query(None),
+    status: str | None = Query(None),
 ) -> dict[str, Any]:
-    # 使用 JOIN 一次性拿到 Message + Conversation.user_id，避免 N+1 查询
-    stmt = (
-        select(Message, Conversation.user_id.label("conv_user_id"))
-        .join(Conversation, Conversation.id == Message.conversation_id)
-        .where(Message.role == "ai", Message.image_urls.isnot(None))
-    )
+    stmt = select(GeneratedAsset, User).outerjoin(User, User.id == GeneratedAsset.user_id)
     if user_id:
-        stmt = stmt.where(Conversation.user_id == user_id)
+        stmt = stmt.where(GeneratedAsset.user_id == user_id)
+    if status:
+        stmt = stmt.where(GeneratedAsset.status == status)
 
     total = (await db.execute(
         select(func.count()).select_from(stmt.subquery())
     )).scalar() or 0
     rows = (await db.execute(
-        stmt.order_by(Message.id.desc()).offset((page - 1) * page_size).limit(page_size)
+        stmt.order_by(
+            GeneratedAsset.status.asc(),
+            GeneratedAsset.id.desc(),
+        ).offset((page - 1) * page_size).limit(page_size)
     )).all()
 
     items = [
-        {
-            "id": m.id,
-            "conversation_id": m.conversation_id,
-            "user_id": conv_user_id,
-            "image_urls": m.image_urls,
-            "status": m.status,
-            "created_at": m.created_at,
-        }
-        for m, conv_user_id in rows
+        _serialize_admin_image_asset_item(asset, user)
+        for asset, user in rows
     ]
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
-@router.delete("/images/{message_id}")
+@router.delete("/images/{asset_id}")
 async def delete_image(
-    message_id: int,
+    asset_id: int,
     request: Request,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, bool]:
-    m = (await db.execute(select(Message).where(Message.id == message_id))).scalar_one_or_none()
-    if m is None:
+    asset = (await db.execute(
+        select(GeneratedAsset).where(GeneratedAsset.id == asset_id)
+    )).scalar_one_or_none()
+    if asset is None:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found"}})
-    m.image_urls = None
+    asset.public_url = None
+    asset.status = "quarantined"
     await _write_admin_log(
-        db, admin.id, "delete_image", _client_ip(request),
-        "message", message_id,
+        db, admin.id, "quarantine_image_asset", _client_ip(request),
+        "generated_asset", asset_id,
     )
     await db.commit()
     return {"ok": True}
+
+
+def _to_admin_msg_out(
+    message: Message,
+    asset_urls_by_message_id: dict[int, list[str]] | None = None,
+) -> dict[str, Any]:
+    asset_urls = (asset_urls_by_message_id or {}).get(message.id, [])
+    image_urls = asset_urls or filter_displayable_image_urls(message.image_urls)
+    text = message.text
+    if message.image_urls and not image_urls and not text.strip():
+        text = "历史图源已失效，无法预览。"
+    out = MessageOut(
+        id=message.id,
+        role=message.role,
+        text=sanitize_customer_message_text(text, message.role),
+        image_urls=image_urls or None,
+        params=message.params,
+        status=getattr(message, "status", "done"),
+        created_at=message.created_at,
+    )
+    return out.model_dump()
+
+
+async def _load_admin_asset_urls_by_message_id(
+    db: AsyncSession,
+    messages: list[Message],
+) -> dict[int, list[str]]:
+    message_ids = [message.id for message in messages]
+    if not message_ids:
+        return {}
+    rows = (await db.execute(
+        select(GeneratedAsset.message_id, GeneratedAsset.public_url)
+        .where(
+            GeneratedAsset.message_id.in_(message_ids),
+            GeneratedAsset.status == "available",
+            GeneratedAsset.public_url.is_not(None),
+        )
+        .order_by(GeneratedAsset.message_id.asc(), GeneratedAsset.slot_index.asc())
+    )).all()
+    urls_by_message_id: dict[int, list[str]] = {}
+    for row in rows:
+        if row.public_url:
+            urls_by_message_id.setdefault(row.message_id, []).append(row.public_url)
+    return urls_by_message_id
+
+
+async def _build_admin_conversation_item(db: AsyncSession, conv: Conversation) -> dict[str, Any]:
+    first_user = await db.execute(
+        select(Message.text)
+        .where(and_(Message.conversation_id == conv.id, Message.role == "user"))
+        .order_by(Message.id.asc())
+        .limit(1)
+    )
+    preview = (first_user.scalar_one_or_none() or "").strip().replace("\n", " ")[:60]
+
+    message_count = int((await db.execute(
+        select(func.count(Message.id)).where(Message.conversation_id == conv.id)
+    )).scalar_one() or 0)
+    pending_count = int((await db.execute(
+        select(func.count(Message.id)).where(
+            and_(
+                Message.conversation_id == conv.id,
+                Message.role == "ai",
+                Message.status == "pending",
+            )
+        )
+    )).scalar_one() or 0)
+
+    return {
+        "id": conv.id,
+        "title": conv.title,
+        "pinned": conv.pinned,
+        "preview": preview,
+        "message_count": message_count,
+        "has_pending": pending_count > 0,
+        "created_at": conv.created_at,
+        "updated_at": conv.updated_at,
+        "deleted_at": conv.deleted_at,
+    }
+
+
+@router.get("/users/{user_id}/conversations")
+async def list_admin_user_conversations(
+    user_id: int,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    _ = admin
+    rows = (await db.execute(
+        select(Conversation)
+        .where(Conversation.user_id == user_id)
+        .order_by(Conversation.pinned.desc(), Conversation.updated_at.desc(), Conversation.id.desc())
+        .limit(200)
+    )).scalars().all()
+    return [await _build_admin_conversation_item(db, row) for row in rows]
+
+
+@router.get("/conversations/{conversation_id}")
+async def get_admin_conversation(
+    conversation_id: int,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    _ = admin
+    conv = (await db.execute(
+        select(Conversation)
+        .options(selectinload(Conversation.messages))
+        .where(Conversation.id == conversation_id)
+    )).scalar_one_or_none()
+    if conv is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "conversation_not_found", "message": "会话不存在"}},
+        )
+
+    item = await _build_admin_conversation_item(db, conv)
+    asset_urls_by_message_id = await _load_admin_asset_urls_by_message_id(db, conv.messages)
+    return {
+        **item,
+        "messages": [
+            _to_admin_msg_out(message, asset_urls_by_message_id)
+            for message in conv.messages
+        ],
+    }
+
+
+# ===== 数据表管理 =====
+
+
+@router.get("/data-tables")
+async def list_admin_data_tables(
+    admin: User = Depends(require_admin),
+) -> list[dict[str, Any]]:
+    _ = admin
+    return [
+        {
+            "key": key,
+            "label": cfg["label"],
+            "columns": cfg["columns"],
+        }
+        for key, cfg in ADMIN_DATA_TABLES.items()
+    ]
+
+
+@router.get("/data-tables/{table_key}")
+async def list_admin_data_table_rows(
+    table_key: str,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: str | None = Query(None),
+    user_id: int | None = Query(None),
+    conversation_id: int | None = Query(None),
+    message_id: int | None = Query(None),
+    status: str | None = Query(None),
+) -> dict[str, Any]:
+    _ = admin
+    cfg = ADMIN_DATA_TABLES.get(table_key)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail={"error": {"code": "table_not_found"}})
+
+    model = cfg["model"]
+    where = []
+    filters = {
+        "user_id": user_id,
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "status": status,
+    }
+    for key, value in filters.items():
+        column = cfg["filter_columns"].get(key)
+        if value is not None and column is not None:
+            where.append(column == value)
+    if search:
+        where.append(_admin_data_table_search_clause(table_key, search.strip()))
+
+    stmt = select(model).where(and_(*where)) if where else select(model)
+    total = (await db.execute(
+        select(func.count()).select_from(stmt.subquery())
+    )).scalar() or 0
+    rows = (await db.execute(
+        stmt.order_by(model.id.desc()).offset((page - 1) * page_size).limit(page_size)
+    )).scalars().all()
+    users_by_row_id = await _load_admin_data_table_users_by_row_id(db, table_key, rows)
+    message_conversation_ids = await _load_credit_message_conversation_ids(db, table_key, rows)
+
+    return {
+        "table": table_key,
+        "label": cfg["label"],
+        "columns": cfg["columns"],
+        "items": [
+            _serialize_admin_data_table_item(
+                table_key,
+                row,
+                users_by_row_id.get(row.id),
+                message_conversation_ids,
+            )
+            for row in rows
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 # ===== 上游渠道管理 =====

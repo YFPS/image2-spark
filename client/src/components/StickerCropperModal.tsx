@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import JSZip from "jszip";
-import { safeImageSrc, segmentImage, GenerateError } from "../api/gptImage";
+import { safeImageSrc, segmentImage, GenerateError, customerErrorMessage } from "../api/gptImage";
 
 /** 自然像素坐标系的矩形选区 */
 type Selection = {
@@ -174,7 +174,7 @@ export function StickerCropperModal({
       URL.revokeObjectURL(url);
     } catch (e) {
       console.error("[cropper] export failed:", e);
-      const msg = e instanceof GenerateError ? e.apiError.message : e instanceof Error ? e.message : String(e);
+      const msg = e instanceof GenerateError ? customerErrorMessage(e.apiError, "图片处理失败，请稍后重试") : e instanceof Error ? e.message : String(e);
       alert(`导出失败：${msg}`);
     } finally {
       setExporting(false);

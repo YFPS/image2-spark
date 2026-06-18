@@ -30,6 +30,7 @@ import {
   imageToSrc,
   safeImageSrc,
   GenerateError,
+  customerErrorMessage,
   type GenerateImage as ApiImage,
   type GenerateUsage as ApiUsage,
 } from "./api/gptImage";
@@ -1147,7 +1148,7 @@ function SimpleGenerateView({
     } catch (e) {
       const msg =
         e instanceof GenerateError
-          ? `${e.apiError.code}：${e.apiError.message}`
+          ? customerErrorMessage(e.apiError)
           : e instanceof Error
             ? e.message
             : String(e);

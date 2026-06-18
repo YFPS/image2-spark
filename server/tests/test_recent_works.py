@@ -53,6 +53,7 @@ if _DB_OK and _REDIS_OK and _JWT_OK:
         CreditTransaction,
         EmailVerificationToken,
         Message,
+        GeneratedAsset,
         User,
     )
     from app.redis_client import get_redis  # noqa: E402
@@ -171,6 +172,38 @@ class RecentWorksTests(unittest.IsolatedAsyncioTestCase):
             await s.commit()
         return mid
 
+    async def _add_asset(
+        self,
+        *,
+        user_id: int,
+        conv_id: int,
+        message_id: int,
+        public_url: str,
+        created_at: datetime | None = None,
+    ) -> int:
+        """直接给一条 AI 消息补资产索引，模拟历史图片迁移/缓存落库。"""
+        factory = get_session_factory()
+        async with factory() as s:
+            asset = GeneratedAsset(
+                user_id=user_id,
+                conversation_id=conv_id,
+                message_id=message_id,
+                slot_index=0,
+                storage_kind="local",
+                storage_key=public_url.rsplit("/", 1)[-1],
+                public_url=public_url,
+                source_url="https://legacy.example/old.png",
+                mime_type="image/png",
+                status="available",
+            )
+            if created_at:
+                asset.created_at = created_at
+            s.add(asset)
+            await s.flush()
+            asset_id = asset.id
+            await s.commit()
+        return asset_id
+
     def _auth(self, token: str) -> dict[str, str]:
         return {"Authorization": f"Bearer {token}"}
 
@@ -228,6 +261,34 @@ class RecentWorksTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["message_id"], good_id)
         self.assertEqual(items[0]["image_url"], "/api/images/assets/live.png")
+
+    async def test_asset_path_uses_message_created_at_not_asset_backfill_time(self):
+        """本地资产是后来回填的，也必须显示原 AI 消息生成时间。"""
+        uid, token = await self._register_and_login()
+        cid = await self._create_conv(uid)
+        message_time = datetime(2026, 5, 23, 10, 57, 48)
+        asset_backfill_time = datetime(2026, 6, 19, 1, 50, 49)
+        mid = await self._add_msg(
+            cid,
+            role="ai",
+            status="done",
+            image_urls=["https://legacy.example/old.png"],
+            created_at=message_time,
+        )
+        await self._add_asset(
+            user_id=uid,
+            conv_id=cid,
+            message_id=mid,
+            public_url=f"/api/images/assets/{mid}-0.png",
+            created_at=asset_backfill_time,
+        )
+
+        r = await self.client.get("/api/me/recent-works", headers=self._auth(token))
+        self.assertEqual(r.status_code, 200, r.text)
+        item = r.json()["items"][0]
+        self.assertEqual(item["message_id"], mid)
+        self.assertEqual(item["image_url"], f"/api/images/assets/{mid}-0.png")
+        self.assertTrue(item["created_at"].startswith("2026-05-23T10:57:48"))
 
     async def test_scans_past_broken_latest_history_images(self):
         """最新一批历史坏图被过滤后，继续向后找仍可展示的作品。"""

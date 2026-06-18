@@ -39,16 +39,16 @@ test("safeImageSrc keeps same-origin asset image URLs unproxied", () => {
   );
 });
 
-test("formatRelativeTime treats naive backend timestamps as UTC elapsed time", () => {
+test("formatRelativeTime treats naive backend timestamps as local time", () => {
   const { formatRelativeTime } = loadTsModule("src/utils/relativeTime.ts");
 
   assert.equal(
-    formatRelativeTime("2026-06-16T16:00:00", new Date("2026-06-19T15:30:00Z")),
-    "2 天前",
+    formatRelativeTime("2026-06-19T01:50:49", new Date("2026-06-19T02:39:33+08:00")),
+    "48 分钟前",
   );
   assert.equal(
-    formatRelativeTime("2026-06-18T14:30:00", new Date("2026-06-19T15:30:00Z")),
-    "昨天",
+    formatRelativeTime("2026-06-18T18:30:00Z", new Date("2026-06-19T02:39:33+08:00")),
+    "9 分钟前",
   );
 });
 

@@ -12,7 +12,7 @@
  */
 function parseServerTime(iso: string): Date {
   const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso);
-  return new Date(hasTimezone ? iso : `${iso}Z`);
+  return new Date(hasTimezone ? iso : iso);
 }
 
 export function formatRelativeTime(iso: string, now: Date = new Date()): string {

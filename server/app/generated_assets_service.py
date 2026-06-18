@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
+from collections.abc import Iterable
 from urllib.parse import urlparse
 
 import httpx
@@ -15,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .asset_storage import AssetStorage, canonical_image_url, get_asset_storage
 from .config import get_settings
-from .models import GeneratedAsset
+from .models import Conversation, GeneratedAsset, Message
 from .schemas import RecentWorkItem
 
 DATA_IMAGE_RE = re.compile(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$", re.DOTALL)
@@ -120,19 +121,58 @@ async def persist_generated_assets(
     return public_urls
 
 
-def asset_to_recent_work_item(asset: GeneratedAsset) -> RecentWorkItem | None:
-    if asset.status != "available" or not asset.public_url:
+def _message_size(message: Message) -> str | None:
+    if message.params and isinstance(message.params, dict):
+        raw_size = message.params.get("size")
+        if isinstance(raw_size, str):
+            return raw_size
+    return None
+
+
+def asset_rows_to_recent_work_items(
+    rows: Iterable[tuple[GeneratedAsset, Message]],
+    *,
+    limit: int,
+) -> list[RecentWorkItem]:
+    grouped: dict[int, tuple[Message, list[GeneratedAsset]]] = {}
+    for asset, message in rows:
+        if asset.status != "available" or not asset.public_url:
+            continue
+        if message.id not in grouped:
+            grouped[message.id] = (message, [])
+        grouped[message.id][1].append(asset)
+
+    items: list[RecentWorkItem] = []
+    for message, assets in grouped.values():
+        assets.sort(key=lambda asset: asset.slot_index)
+        urls = [
+            canonical_image_url(asset.public_url)
+            for asset in assets
+            if asset.public_url
+        ]
+        if not urls:
+            continue
+        items.append(
+            RecentWorkItem(
+                message_id=message.id,
+                conversation_id=message.conversation_id,
+                image_url=urls[0],
+                image_count=len(urls),
+                all_image_urls=urls,
+                size=_message_size(message),
+                created_at=message.created_at,
+            )
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+def asset_to_recent_work_item(asset: GeneratedAsset, message: Message) -> RecentWorkItem | None:
+    items = asset_rows_to_recent_work_items([(asset, message)], limit=1)
+    if not items:
         return None
-    public_url = canonical_image_url(asset.public_url)
-    return RecentWorkItem(
-        message_id=asset.message_id,
-        conversation_id=asset.conversation_id,
-        image_url=public_url,
-        image_count=1,
-        all_image_urls=[public_url],
-        size=None,
-        created_at=asset.created_at,
-    )
+    return items[0]
 
 
 async def list_user_assets(
@@ -142,20 +182,49 @@ async def list_user_assets(
     cursor: int | None = None,
     limit: int = 12,
 ) -> tuple[list[RecentWorkItem], int | None]:
-    where = [GeneratedAsset.user_id == user_id, GeneratedAsset.status == "available"]
+    where = [
+        GeneratedAsset.user_id == user_id,
+        GeneratedAsset.status == "available",
+        GeneratedAsset.public_url.is_not(None),
+        Conversation.user_id == user_id,
+        Conversation.deleted_at.is_(None),
+        Message.role == "ai",
+        Message.status == "done",
+    ]
     if cursor is not None:
-        where.append(GeneratedAsset.id < cursor)
+        where.append(Message.id < cursor)
 
-    rows = (
+    message_ids = (
         await db.execute(
-            select(GeneratedAsset)
+            select(GeneratedAsset.message_id)
+            .join(Message, Message.id == GeneratedAsset.message_id)
+            .join(Conversation, Conversation.id == Message.conversation_id)
             .where(and_(*where))
-            .order_by(GeneratedAsset.id.desc())
+            .group_by(GeneratedAsset.message_id)
+            .order_by(GeneratedAsset.message_id.desc())
             .limit(limit + 1)
         )
     ).scalars().all()
 
-    page_rows = rows[:limit]
-    items = [item for asset in page_rows if (item := asset_to_recent_work_item(asset)) is not None]
-    next_cursor = page_rows[-1].id if len(rows) > limit and page_rows else None
+    page_message_ids = message_ids[:limit]
+    if not page_message_ids:
+        return [], None
+
+    rows = (
+        await db.execute(
+            select(GeneratedAsset, Message)
+            .join(Message, Message.id == GeneratedAsset.message_id)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(
+                and_(
+                    *where,
+                    GeneratedAsset.message_id.in_(page_message_ids),
+                )
+            )
+            .order_by(GeneratedAsset.message_id.desc(), GeneratedAsset.slot_index.asc())
+        )
+    ).all()
+
+    items = asset_rows_to_recent_work_items(rows, limit=limit)
+    next_cursor = page_message_ids[-1] if len(message_ids) > limit and page_message_ids else None
     return items, next_cursor
