@@ -62,12 +62,16 @@ async def persist_generated_assets(
     message_id: int,
     urls: list[str],
     output_format: str,
+    slot_indexes: list[int] | None = None,
     storage: AssetStorage | None = None,
 ) -> list[str]:
     storage = storage or get_asset_storage()
     public_urls: list[str] = []
+    if slot_indexes is not None and len(slot_indexes) != len(urls):
+        raise ValueError("slot_indexes 长度必须与 urls 一致")
+    indexed_urls = list(enumerate(urls)) if slot_indexes is None else list(zip(slot_indexes, urls))
 
-    for idx, src in enumerate(urls):
+    for idx, src in indexed_urls:
         broken = is_broken_source_url(src)
         try:
             if broken:

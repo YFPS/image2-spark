@@ -121,3 +121,21 @@ class GeneratedAssetsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(asset.storage_kind, "missing")
         self.assertIsNone(asset.public_url)
         self.assertEqual(asset.status, "missing")
+
+    async def test_persist_generated_assets_respects_explicit_slot_indexes(self):
+        db = FakeDb()
+        storage = FakeStorage()
+
+        await persist_generated_assets(
+            db,  # type: ignore[arg-type]
+            user_id=7,
+            conversation_id=8,
+            message_id=42,
+            urls=["data:image/png;base64,aGVsbG8="],
+            output_format="png",
+            slot_indexes=[3],
+            storage=storage,
+        )
+
+        self.assertEqual(storage.saved[0]["slot_index"], 3)
+        self.assertEqual(db.added[0].slot_index, 3)
