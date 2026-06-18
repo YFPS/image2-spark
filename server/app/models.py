@@ -36,6 +36,8 @@ MessageRole = Literal["user", "ai"]
 # AI 消息的生命周期：客户端发起生图请求后立即落 pending；后台 task 完成时改 done 或 failed
 # user 消息恒为 done（无需 await 上游）
 MessageStatus = Literal["done", "pending", "failed"]
+GeneratedAssetStorageKind = Literal["local", "cos", "remote_legacy", "data_legacy", "missing"]
+GeneratedAssetStatus = Literal["available", "missing", "quarantined"]
 
 
 class User(Base):
@@ -336,3 +338,72 @@ class Message(Base):
     )
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
+
+
+class GeneratedAsset(Base):
+    """AI 生成图片资产索引，一行对应一条 AI 消息里的一张图片。"""
+
+    __tablename__ = "generated_assets"
+    __table_args__ = (
+        UniqueConstraint("message_id", "slot_index", name="uk_asset_message_slot"),
+        Index("idx_asset_user_created", "user_id", "created_at", "id"),
+        Index("idx_asset_user_id", "user_id", "id"),
+        Index("idx_asset_status_kind", "status", "storage_kind"),
+        {
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+            "mysql_collate": "utf8mb4_0900_ai_ci",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(MyBigInt(unsigned=True), primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        MyBigInt(unsigned=True),
+        ForeignKey("users.id", ondelete="CASCADE", name="fk_asset_user"),
+        nullable=False,
+    )
+    conversation_id: Mapped[int] = mapped_column(
+        MyBigInt(unsigned=True),
+        ForeignKey("conversations.id", ondelete="CASCADE", name="fk_asset_conv"),
+        nullable=False,
+    )
+    message_id: Mapped[int] = mapped_column(
+        MyBigInt(unsigned=True),
+        ForeignKey("messages.id", ondelete="CASCADE", name="fk_asset_msg"),
+        nullable=False,
+    )
+    slot_index: Mapped[int] = mapped_column(nullable=False)
+    storage_kind: Mapped[GeneratedAssetStorageKind] = mapped_column(
+        Enum(
+            "local",
+            "cos",
+            "remote_legacy",
+            "data_legacy",
+            "missing",
+            name="generated_asset_storage_kind",
+        ),
+        nullable=False,
+    )
+    storage_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    public_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    width: Mapped[int | None] = mapped_column(nullable=True)
+    height: Mapped[int | None] = mapped_column(nullable=True)
+    bytes: Mapped[int | None] = mapped_column(MyBigInt(unsigned=True), nullable=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[GeneratedAssetStatus] = mapped_column(
+        Enum("available", "missing", "quarantined", name="generated_asset_status"),
+        nullable=False,
+        default="available",
+        server_default="available",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.current_timestamp()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=func.current_timestamp(),
+        server_onupdate=func.current_timestamp(),
+    )

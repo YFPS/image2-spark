@@ -124,8 +124,8 @@ class GeneratedAsset(Base):
 ```python
 """create generated_assets table
 
-Revision ID: 0006_generated_assets
-Revises: 0005_audit_logs
+Revision ID: 0006
+Revises: 0005
 Create Date: 2026-06-19
 """
 from __future__ import annotations
@@ -134,8 +134,8 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import mysql
 
-revision = "0006_generated_assets"
-down_revision = "0005_audit_logs"
+revision = "0006"
+down_revision = "0005"
 branch_labels = None
 depends_on = None
 
