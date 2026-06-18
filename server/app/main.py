@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -214,3 +216,60 @@ app.include_router(admin.router)
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+async def _probe_db() -> dict[str, object]:
+    started = time.perf_counter()
+    try:
+        engine = get_engine()
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        return {"ok": True, "latency_ms": int((time.perf_counter() - started) * 1000)}
+    except Exception as e:  # noqa: BLE001
+        return {
+            "ok": False,
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "error": str(e),
+        }
+
+
+async def _probe_redis() -> dict[str, object]:
+    started = time.perf_counter()
+    try:
+        redis = get_redis()
+        pong = await redis.ping()
+        if not pong:
+            raise RuntimeError("Redis ping 未返回 PONG")
+        return {"ok": True, "latency_ms": int((time.perf_counter() - started) * 1000)}
+    except Exception as e:  # noqa: BLE001
+        return {
+            "ok": False,
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "error": str(e),
+        }
+
+
+def _probe_asset_storage() -> dict[str, object]:
+    try:
+        settings = get_settings()
+        if settings.asset_storage_backend != "local":
+            return {"ok": True, "backend": settings.asset_storage_backend}
+        root = Path(settings.generated_image_dir).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        return {"ok": root.is_dir(), "backend": "local", "path": str(root)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/health/deep")
+async def health_deep() -> dict[str, object]:
+    db = await _probe_db()
+    redis = await _probe_redis()
+    asset_storage = _probe_asset_storage()
+    status = "ok" if db["ok"] and redis["ok"] and asset_storage["ok"] else "degraded"
+    return {
+        "status": status,
+        "db": db,
+        "redis": redis,
+        "asset_storage": asset_storage,
+    }
