@@ -16,11 +16,16 @@ INTERNAL_TEXT_MARKERS = (
     "上游",
 )
 
+GENERATION_CREDIT_UNAVAILABLE_TEXT = "失败：生成额度暂时不足，请联系管理员处理。"
+GENERATION_CREDIT_REFUNDED_TEXT = "生图失败已退款：生成额度暂时不足，请联系管理员处理。"
+
 
 def customer_failure_text(exc: Exception) -> str:
     if isinstance(exc, UpstreamTimeout):
         return "失败：生成服务响应超时，请稍后再试。"
     if isinstance(exc, UpstreamError):
+        if exc.status == 402:
+            return GENERATION_CREDIT_UNAVAILABLE_TEXT
         if exc.status in {429}:
             return "失败：生成服务繁忙，请稍后再试。"
         if exc.status in {400, 422}:
@@ -35,6 +40,8 @@ def sanitize_customer_message_text(text: str, role: str | None = None) -> str:
 
     upper = text.upper()
     if text.startswith("失败：") and any(marker.upper() in upper for marker in INTERNAL_TEXT_MARKERS):
+        if "402" in upper or "PAYMENT" in upper or "余额" in text or "额度" in text:
+            return GENERATION_CREDIT_UNAVAILABLE_TEXT
         if "超时" in text or "TIMEOUT" in upper:
             return "失败：生成服务响应超时，请稍后再试。"
         return "失败：生成服务暂时不可用，请稍后再试。"
@@ -61,6 +68,8 @@ def sanitize_customer_note_text(text: str | None) -> str | None:
 
     upper = text.upper()
     if text.startswith("生图失败退款"):
+        if "402" in upper or "PAYMENT" in upper or "余额" in text or "额度" in text:
+            return GENERATION_CREDIT_REFUNDED_TEXT
         if "超时" in text or "TIMEOUT" in upper:
             return "生图失败已退款：生成服务响应超时，请稍后再试。"
         if "未返回" in text or "DATA=[]" in upper:

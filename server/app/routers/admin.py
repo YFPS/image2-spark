@@ -1255,6 +1255,10 @@ def _upstream_health_item(
     )
 
 
+def _is_upstream_health_ok(status_code: int) -> bool:
+    return 200 <= status_code < 400
+
+
 @router.post("/upstreams/{channel_id}/health-check")
 async def health_check_upstream(
     channel_id: int,
@@ -1277,7 +1281,7 @@ async def health_check_upstream(
             resp = await client.get(f"{ch.base_url}/models", headers={
                 "Authorization": f"Bearer {plain_key}",
             })
-            ok = resp.status_code < 500
+            ok = _is_upstream_health_ok(resp.status_code)
     except Exception:
         ok = False
     latency = int((time.monotonic() - start) * 1000)

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from app import openai_client
 from app.openai_client import UpstreamError
+from app.routers.admin import _is_upstream_health_ok
 from app.upstream_monitoring import UpstreamAttempt, summarize_upstream_metrics
 
 
@@ -92,6 +93,14 @@ class UpstreamMetricsSummaryTests(unittest.TestCase):
         self.assertEqual(metrics.avg_latency_ms, 433)
         self.assertEqual(metrics.p95_latency_ms, 900)
         self.assertEqual(metrics.recent_p95_latency_ms, 300)
+
+
+class UpstreamHealthCheckTests(unittest.TestCase):
+    def test_health_check_treats_402_as_unhealthy(self):
+        self.assertTrue(_is_upstream_health_ok(200))
+        self.assertTrue(_is_upstream_health_ok(302))
+        self.assertFalse(_is_upstream_health_ok(402))
+        self.assertFalse(_is_upstream_health_ok(500))
 
 
 if __name__ == "__main__":
