@@ -39,8 +39,10 @@ class ImageTaskResultParsingTests(unittest.TestCase):
     def test_customer_failure_text_explains_credit_unavailable_without_internal_words(self):
         text = _customer_failure_text(UpstreamError(402, "上游返回 402"))
 
-        self.assertEqual(text, "失败：生成额度暂时不足，请联系管理员处理。")
+        self.assertEqual(text, "失败：当前无法完成生成，请联系管理员处理。")
         self.assertNotIn("上游", text)
+        self.assertNotIn("服务器", text)
+        self.assertNotIn("额度", text)
         self.assertNotIn("API", text.upper())
         self.assertNotIn("KEY", text.upper())
 
@@ -59,8 +61,10 @@ class ImageTaskResultParsingTests(unittest.TestCase):
     def test_customer_note_text_explains_credit_unavailable(self):
         note = sanitize_customer_note_text("生图失败退款：upstream_error: 上游返回 402")
 
-        self.assertEqual(note, "生图失败已退款：生成额度暂时不足，请联系管理员处理。")
+        self.assertEqual(note, "生图失败已退款：当前无法完成生成，请联系管理员处理。")
         self.assertNotIn("上游", note)
+        self.assertNotIn("服务器", note)
+        self.assertNotIn("额度", note)
         self.assertNotIn("upstream_error", note)
 
 
