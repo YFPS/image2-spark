@@ -44,6 +44,48 @@
   }
 }
 
+/* 首页公告条：内容从左向右连续滚动，标签与计数保持静止。 */
+.announcement-marquee-window {
+  align-items: center;
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 24px, #000 calc(100% - 24px), transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 24px, #000 calc(100% - 24px), transparent);
+}
+
+.announcement-marquee-track {
+  animation: announcement-marquee-ltr var(--announcement-marquee-duration, 18s) linear infinite;
+  display: inline-flex;
+  min-width: max-content;
+  white-space: nowrap;
+  will-change: transform;
+}
+
+.announcement-marquee-window:hover .announcement-marquee-track {
+  animation-play-state: paused;
+}
+
+@keyframes announcement-marquee-ltr {
+  from {
+    transform: translateX(-50%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .announcement-marquee-track {
+    animation: none;
+    transform: none;
+  }
+
+  .announcement-marquee-track [data-announcement-duplicate="true"] {
+    display: none;
+  }
+}
+
 /* Mobile touch optimization */
 @media (max-width: 768px) {
   body {

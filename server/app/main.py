@@ -20,7 +20,7 @@ from .db import get_engine
 from .rate_limit import get_limiter
 from .redis_client import get_redis
 from .middleware.access_log import AccessLogMiddleware
-from .routers import admin, auth, conversations, images, logs, recent_works, works
+from .routers import admin, announcements, auth, conversations, images, logs, recent_works, works
 
 logger = logging.getLogger("image2")
 
@@ -61,20 +61,29 @@ async def lifespan(app: FastAPI):
     try:
         from .db import get_session_factory as _gsf
         from .models import UpstreamChannel as _UC
+        from .upstream_channels import (
+            should_repair_upstream_channel_name as _repair_upstream_name,
+            upstream_channel_display_name as _upstream_display_name,
+        )
         from sqlalchemy import select as _sel
 
         _settings = get_settings()
         _factory = _gsf()
         async with _factory() as _db:
+            _current_default = (await _db.execute(
+                _sel(_UC).where(_UC.is_default == True).limit(1)  # noqa: E712
+            )).scalar_one_or_none()
             _existing = (await _db.execute(
                 _sel(_UC).where(_UC.base_url == _settings.openai_base_url).limit(1)
             )).scalar_one_or_none()
             if _existing is None and _settings.openai_api_key:
+                _primary_name = _upstream_display_name(_settings.openai_base_url)
                 _db.add(_UC(
-                    name="默认上游",
+                    name=_primary_name,
                     base_url=_settings.openai_base_url,
                     api_key=_settings.openai_api_key,
                     enabled=True,
+                    is_default=_current_default is None,
                     priority=100,
                     supports_edit=True,
                     max_concurrent=10,
@@ -82,17 +91,33 @@ async def lifespan(app: FastAPI):
                 ))
                 await _db.commit()
                 logger.info("已自动创建默认上游渠道: %s", _settings.openai_base_url)
+            elif _existing is not None:
+                _changed_existing = False
+                if _repair_upstream_name(_existing.name, _existing.base_url):
+                    _existing.name = _upstream_display_name(_existing.base_url)
+                    _changed_existing = True
+                if _current_default is None:
+                    _existing.is_default = True
+                    _changed_existing = True
+                if _changed_existing:
+                    await _db.commit()
             # 备用上游渠道
-            if _existing is None and _settings.openai_base_url_backup and _settings.openai_api_key_backup:
+            if _settings.openai_base_url_backup and _settings.openai_api_key_backup:
                 _backup = (await _db.execute(
                     _sel(_UC).where(_UC.base_url == _settings.openai_base_url_backup).limit(1)
                 )).scalar_one_or_none()
                 if _backup is None:
+                    _backup_name = _upstream_display_name(
+                        _settings.openai_base_url_backup,
+                        role="backup",
+                    )
                     _db.add(_UC(
-                        name="备用上游",
+                        name=_backup_name,
                         base_url=_settings.openai_base_url_backup,
                         api_key=_settings.openai_api_key_backup,
                         enabled=True,
+                        is_default=False,
+                        auto_switch_enabled=True,
                         priority=50,
                         supports_edit=True,
                         max_concurrent=10,
@@ -100,6 +125,9 @@ async def lifespan(app: FastAPI):
                     ))
                     await _db.commit()
                     logger.info("已自动创建备用上游渠道: %s", _settings.openai_base_url_backup)
+                elif _repair_upstream_name(_backup.name, _backup.base_url):
+                    _backup.name = _upstream_display_name(_backup.base_url, role="backup")
+                    await _db.commit()
     except Exception:
         logger.warning("自动创建默认上游渠道跳过", exc_info=True)
 
@@ -205,6 +233,7 @@ async def _validation_handler(request: Request, exc: RequestValidationError):
 app.add_middleware(AccessLogMiddleware)
 
 app.include_router(images.router)
+app.include_router(announcements.router)
 app.include_router(auth.router)
 app.include_router(conversations.router)
 app.include_router(recent_works.router)

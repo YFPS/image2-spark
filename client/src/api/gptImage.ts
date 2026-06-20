@@ -17,6 +17,8 @@ export type GenerateRequest = {
   output_compression?: number;
   moderation: string;
   reasoning?: boolean;
+  view_angle?: number;
+  multi_view_grid?: boolean;
 };
 
 export type GenerateImage = {
@@ -161,27 +163,16 @@ export function safeImageSrc(src: string): string {
   return `/api/images/proxy-image?url=${encodeURIComponent(src)}`;
 }
 
-/* ─── 后端 ML 抠图 ─── */
-
-export type SegmentRequest = {
-  url: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  padding_factor?: number;
-};
-
 /** Inpainting / 多参考图编辑请求：multipart 上传，调上游 /v1/images/edits
  *  imageBlobs[0] 与 maskBlob 对齐（mask 只作用于第 1 张）；其余张作为额外参考 */
 export type EditRequest = {
   imageBlobs: Blob[];
-  maskBlob: Blob;
+  maskBlob?: Blob;
   prompt: string;
   size?: string;
   quality?: string;
   n?: number;
-  /** "auto" | "opaque" | "transparent"（透明 PNG，AI 抠图用） */
+  /** "auto" | "opaque" | "transparent" */
   background?: string;
 };
 
@@ -199,7 +190,7 @@ export async function editImage(
     throw new GenerateError({ code: "validation_error", message: "至少需要 1 张参考图" });
   }
   req.imageBlobs.forEach((b, i) => form.append("image", b, `image-${i}.png`));
-  form.append("mask", req.maskBlob, "mask.png");
+  if (req.maskBlob) form.append("mask", req.maskBlob, "mask.png");
   form.append("prompt", req.prompt);
   form.append("conversation_id", String(conversationId));
   if (req.size) form.append("size", req.size);
@@ -223,64 +214,6 @@ export async function editImage(
     throw new GenerateError(withCustomerMessage(apiError));
   }
   return (await res.json()) as MessageOut;
-}
-
-/**
- * 调后端笔刷抠图（MobileSAM mask-prompt）：用户涂粗略区，模型沿真实主体边缘精化。
- * 返回与原图同尺寸的 RGBA PNG（alpha 为精细 mask），便于前端原位叠加做 PSD 分层。
- * P1 起需鉴权：用 authFetch 自动附 Bearer
- */
-export async function brushCutout(req: {
-  imageBlob: Blob;
-  maskBlob: Blob;
-  subjectType?: "auto" | "object" | "text";
-}): Promise<Blob> {
-  const form = new FormData();
-  form.append("image", req.imageBlob, "image.png");
-  form.append("mask", req.maskBlob, "mask.png");
-  if (req.subjectType) form.append("subject_type", req.subjectType);
-  const res = await authFetch("/api/images/brush-cutout", { method: "POST", body: form });
-  if (!res.ok) {
-    let apiError: ApiError = { code: "http_error", message: `HTTP ${res.status}` };
-    try {
-      const j = await res.json();
-      if (j.error) apiError = j.error;
-      else if (j.detail?.error) apiError = j.detail.error;
-    } catch {
-      /* 忽略 */
-    }
-    // 429 友好文案补全
-    if (res.status === 429 && !apiError.message) {
-      apiError = { code: "rate_limited", message: "操作过于频繁，请稍后再试" };
-    }
-    throw new GenerateError(withCustomerMessage(apiError, "图片处理失败，请稍后重试"));
-  }
-  return await res.blob();
-}
-
-/** 调后端 ML 抠图，返回带透明背景的 PNG Blob
- *  P1 起需鉴权：用 authFetch 自动附 Bearer */
-export async function segmentImage(req: SegmentRequest): Promise<Blob> {
-  const res = await authFetch("/api/images/segment", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(req),
-  });
-  if (!res.ok) {
-    let apiError: ApiError = { code: "http_error", message: `HTTP ${res.status}` };
-    try {
-      const j = await res.json();
-      if (j.error) apiError = j.error;
-      else if (j.detail?.error) apiError = j.detail.error;
-    } catch {
-      /* 忽略 */
-    }
-    if (res.status === 429 && !apiError.message) {
-      apiError = { code: "rate_limited", message: "操作过于频繁，请稍后再试" };
-    }
-    throw new GenerateError(withCustomerMessage(apiError, "图片处理失败，请稍后重试"));
-  }
-  return await res.blob();
 }
 
 // ===== 最近作品（GET /api/me/recent-works）=====

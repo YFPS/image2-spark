@@ -6,13 +6,15 @@ import type {
   DAUItem, TrafficStats, UpstreamChannel, UpstreamHealth,
   AdminDataTableKey, AdminDataTableMeta, AdminDataTablePage, AdminDataTableRow,
   AdminConversationListItem, AdminConversationDetail, AdminImageAsset,
+  AdminAnnouncement,
 } from "../api/admin";
 
-type Tab = "dashboard" | "users" | "logs" | "images" | "data" | "upstreams" | "monitor";
+type Tab = "dashboard" | "users" | "announcements" | "logs" | "images" | "data" | "upstreams" | "monitor";
 
 const TABS: { key: Tab; label: string }[] = [
   { key: "dashboard", label: "概览" },
   { key: "users", label: "用户" },
+  { key: "announcements", label: "公告" },
   { key: "logs", label: "日志" },
   { key: "images", label: "图片" },
   { key: "data", label: "用户数据" },
@@ -48,7 +50,7 @@ function DashboardTab() {
     { label: "今日活跃", value: String(stats.today_active_users) },
     { label: "总生图", value: String(stats.total_images_generated), sub: `今日 +${stats.today_images_generated}` },
     { label: "总消耗积分", value: String(stats.total_credits_consumed), sub: `今日 +${stats.today_credits_consumed}` },
-    { label: "今日请求", value: String(traffic?.today_requests ?? "…") },
+    { label: "生图请求", value: String(stats.total_generation_requests), sub: `今日 +${stats.today_generation_requests}` },
     { label: "平均耗时", value: traffic ? `${traffic.avg_duration_ms}ms` : "…" },
     { label: "错误率", value: traffic ? `${traffic.error_rate}%` : "…" },
   ];
@@ -238,6 +240,290 @@ function UsersTab() {
             <div className="flex justify-end gap-2">
               <button onClick={() => setCreditModal(null)} className="rounded-[8px] bg-white/[0.06] px-4 py-2 text-[13px]">取消</button>
               <button onClick={handleAdjustCredits} disabled={!creditDelta} className="rounded-[8px] bg-amber-500/80 px-4 py-2 text-[13px] text-black disabled:opacity-40">确认</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+type AnnouncementForm = {
+  title: string;
+  content: string;
+  link_url: string;
+  link_label: string;
+  enabled: boolean;
+  pinned: boolean;
+  priority: number;
+  starts_at: string;
+  ends_at: string;
+};
+
+const EMPTY_ANNOUNCEMENT_FORM: AnnouncementForm = {
+  title: "",
+  content: "",
+  link_url: "",
+  link_label: "",
+  enabled: true,
+  pinned: false,
+  priority: 0,
+  starts_at: "",
+  ends_at: "",
+};
+
+function toDatetimeLocal(value: string | null): string {
+  if (!value) return "";
+  return value.slice(0, 16);
+}
+
+function toAnnouncementPayload(form: AnnouncementForm): api.AnnouncementInput {
+  return {
+    title: form.title.trim(),
+    content: form.content.trim(),
+    link_url: form.link_url.trim() || null,
+    link_label: form.link_label.trim() || null,
+    enabled: form.enabled,
+    pinned: form.pinned,
+    priority: Number(form.priority) || 0,
+    starts_at: form.starts_at || null,
+    ends_at: form.ends_at || null,
+  };
+}
+
+function announcementStatusText(row: AdminAnnouncement): string {
+  const now = Date.now();
+  const starts = row.starts_at ? new Date(row.starts_at).getTime() : null;
+  const ends = row.ends_at ? new Date(row.ends_at).getTime() : null;
+  if (!row.enabled) return "已停用";
+  if (starts && starts > now) return "待开始";
+  if (ends && ends < now) return "已过期";
+  return "展示中";
+}
+
+function AnnouncementsTab() {
+  const [data, setData] = useState<api.Paged<AdminAnnouncement> | null>(null);
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<AdminAnnouncement | null>(null);
+  const [showAdd, setShowAdd] = useState(false);
+  const [form, setForm] = useState<AnnouncementForm>(EMPTY_ANNOUNCEMENT_FORM);
+
+  const load = useCallback(() => {
+    api.getAnnouncements({ page, page_size: 20, search: search || undefined })
+      .then(setData)
+      .catch((e) => setError(e.message || "加载公告失败"));
+  }, [page, search]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const resetForm = () => setForm({ ...EMPTY_ANNOUNCEMENT_FORM });
+
+  const openCreate = () => {
+    resetForm();
+    setEditing(null);
+    setShowAdd(true);
+  };
+
+  const openEdit = (row: AdminAnnouncement) => {
+    setEditing(row);
+    setForm({
+      title: row.title,
+      content: row.content,
+      link_url: row.link_url || "",
+      link_label: row.link_label || "",
+      enabled: row.enabled,
+      pinned: row.pinned,
+      priority: row.priority,
+      starts_at: toDatetimeLocal(row.starts_at),
+      ends_at: toDatetimeLocal(row.ends_at),
+    });
+    setShowAdd(true);
+  };
+
+  const closeForm = () => {
+    setShowAdd(false);
+    setEditing(null);
+    resetForm();
+  };
+
+  const handleSave = async () => {
+    try {
+      const payload = toAnnouncementPayload(form);
+      if (editing) {
+        await api.updateAnnouncement(editing.id, payload);
+      } else {
+        await api.createAnnouncement(payload);
+      }
+      closeForm();
+      load();
+    } catch (e: any) {
+      setError(e.message || "保存公告失败");
+    }
+  };
+
+  const handleDelete = async (id: number) => {
+    if (!confirm("确认删除这条公告？")) return;
+    try {
+      await api.deleteAnnouncement(id);
+      load();
+    } catch (e: any) {
+      setError(e.message || "删除公告失败");
+    }
+  };
+
+  const handleToggle = async (row: AdminAnnouncement) => {
+    try {
+      await api.updateAnnouncement(row.id, { enabled: !row.enabled });
+      load();
+    } catch (e: any) {
+      setError(e.message || "更新公告状态失败");
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      {error && <div className="text-red-400 text-[13px]">{error}</div>}
+      <div className="flex gap-2">
+        <input
+          className="min-w-0 flex-1 rounded-[10px] bg-white/[0.06] px-3 py-2 text-[13px] text-white/90 outline-none placeholder:text-white/30"
+          placeholder="搜索标题或内容"
+          value={search}
+          onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+        />
+        <button onClick={openCreate} className="rounded-[10px] bg-white/[0.08] px-3 py-2 text-[12px] font-medium text-white/86 hover:bg-white/[0.12]">
+          新增公告
+        </button>
+      </div>
+
+      <div className="space-y-2">
+        {data?.items.map((row) => {
+          const status = announcementStatusText(row);
+          return (
+            <div key={row.id} className="rounded-[14px] bg-white/[0.04] p-3">
+              <div className="flex items-start gap-3">
+                <div className={cls(
+                  "mt-1 h-2 w-2 shrink-0 rounded-full",
+                  status === "展示中" && "bg-emerald-400",
+                  status === "待开始" && "bg-sky-300",
+                  status === "已过期" && "bg-white/25",
+                  status === "已停用" && "bg-red-400",
+                )} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="truncate text-[13px] font-medium text-white/90">{row.title}</span>
+                    <span className="rounded bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-white/45">{status}</span>
+                    {row.pinned && <span className="rounded bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-white/60">置顶</span>}
+                    <span className="text-[10px] text-white/28">优先级 {row.priority}</span>
+                  </div>
+                  <div className="mt-1 line-clamp-2 text-[12px] leading-relaxed text-white/50">{row.content}</div>
+                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-white/28">
+                    <span>开始：{row.starts_at ? new Date(row.starts_at).toLocaleString() : "立即"}</span>
+                    <span>结束：{row.ends_at ? new Date(row.ends_at).toLocaleString() : "长期"}</span>
+                    {row.link_url && <span className="max-w-[280px] truncate">链接：{row.link_url}</span>}
+                  </div>
+                </div>
+                <div className="flex shrink-0 gap-1.5">
+                  <button onClick={() => handleToggle(row)} className="rounded bg-white/[0.06] px-2 py-1 text-[11px] hover:bg-white/10">
+                    {row.enabled ? "停用" : "启用"}
+                  </button>
+                  <button onClick={() => openEdit(row)} className="rounded bg-white/[0.06] px-2 py-1 text-[11px] hover:bg-white/10">编辑</button>
+                  <button onClick={() => handleDelete(row.id)} className="rounded bg-red-500/20 px-2 py-1 text-[11px] hover:bg-red-500/30">删除</button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {data && data.items.length === 0 && <div className="py-8 text-center text-[13px] text-white/30">暂无公告</div>}
+      </div>
+
+      {data && data.total > data.page_size && (
+        <div className="flex items-center justify-center gap-3 text-[12px]">
+          <button disabled={page <= 1} onClick={() => setPage(page - 1)} className="rounded bg-white/[0.06] px-3 py-1 disabled:opacity-30">上一页</button>
+          <span className="text-white/40">{page} / {Math.ceil(data.total / data.page_size)}</span>
+          <button disabled={page >= Math.ceil(data.total / data.page_size)} onClick={() => setPage(page + 1)} className="rounded bg-white/[0.06] px-3 py-1 disabled:opacity-30">下一页</button>
+        </div>
+      )}
+
+      {showAdd && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/60" onClick={closeForm}>
+          <div className="w-[520px] max-w-[calc(100vw-32px)] space-y-3 rounded-[16px] bg-[#1e1e22] p-5" onClick={(e) => e.stopPropagation()}>
+            <div className="text-[15px] font-medium">{editing ? "编辑公告" : "新增公告"}</div>
+            <input
+              value={form.title}
+              onChange={(e) => setForm({ ...form, title: e.target.value })}
+              placeholder="公告标题"
+              className="w-full rounded-[8px] bg-white/[0.06] px-3 py-2 text-[13px] text-white/90 outline-none placeholder:text-white/30"
+            />
+            <textarea
+              value={form.content}
+              onChange={(e) => setForm({ ...form, content: e.target.value })}
+              placeholder="公告内容"
+              rows={4}
+              className="w-full resize-none rounded-[8px] bg-white/[0.06] px-3 py-2 text-[13px] text-white/90 outline-none placeholder:text-white/30"
+            />
+            <div className="grid gap-2 sm:grid-cols-2">
+              <input
+                value={form.link_url}
+                onChange={(e) => setForm({ ...form, link_url: e.target.value })}
+                placeholder="链接地址（可选）"
+                className="rounded-[8px] bg-white/[0.06] px-3 py-2 text-[13px] text-white/90 outline-none placeholder:text-white/30"
+              />
+              <input
+                value={form.link_label}
+                onChange={(e) => setForm({ ...form, link_label: e.target.value })}
+                placeholder="链接文案（可选）"
+                className="rounded-[8px] bg-white/[0.06] px-3 py-2 text-[13px] text-white/90 outline-none placeholder:text-white/30"
+              />
+            </div>
+            <div className="grid gap-2 sm:grid-cols-3">
+              <label className="text-[12px] text-white/40">优先级
+                <input
+                  type="number"
+                  min={0}
+                  max={999}
+                  value={form.priority}
+                  onChange={(e) => setForm({ ...form, priority: Number(e.target.value) })}
+                  className="mt-1 w-full rounded-[8px] bg-white/[0.06] px-3 py-2 text-[13px] text-white/90 outline-none"
+                />
+              </label>
+              <label className="text-[12px] text-white/40">开始时间
+                <input
+                  type="datetime-local"
+                  value={form.starts_at}
+                  onChange={(e) => setForm({ ...form, starts_at: e.target.value })}
+                  className="mt-1 w-full rounded-[8px] bg-white/[0.06] px-3 py-2 text-[13px] text-white/90 outline-none"
+                />
+              </label>
+              <label className="text-[12px] text-white/40">结束时间
+                <input
+                  type="datetime-local"
+                  value={form.ends_at}
+                  onChange={(e) => setForm({ ...form, ends_at: e.target.value })}
+                  className="mt-1 w-full rounded-[8px] bg-white/[0.06] px-3 py-2 text-[13px] text-white/90 outline-none"
+                />
+              </label>
+            </div>
+            <div className="flex flex-wrap gap-4 text-[12px] text-white/50">
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} />
+                启用
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={form.pinned} onChange={(e) => setForm({ ...form, pinned: e.target.checked })} />
+                置顶
+              </label>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button onClick={closeForm} className="rounded-[8px] bg-white/[0.06] px-4 py-2 text-[13px]">取消</button>
+              <button
+                onClick={handleSave}
+                disabled={!form.title.trim() || !form.content.trim()}
+                className="rounded-[8px] bg-white/[0.86] px-4 py-2 text-[13px] font-medium text-[#0D0D0D] disabled:opacity-40"
+              >
+                保存
+              </button>
             </div>
           </div>
         </div>
@@ -469,6 +755,8 @@ const FIELD_LABELS: Record<string, string> = {
   background: "背景",
   output_format: "输出格式",
   moderation: "安全策略",
+  view_angle: "视角",
+  multi_view_grid: "多宫格",
   created_at: "创建时间",
   updated_at: "更新时间",
   deleted_at: "删除时间",
@@ -486,6 +774,21 @@ const VALUE_LABELS: Record<string, Record<string, string>> = {
   background: { auto: "自动", opaque: "不透明" },
   output_format: { png: "PNG", jpeg: "JPEG", webp: "WEBP" },
   moderation: { auto: "自动", low: "较低" },
+  view_angle: {
+    "0": "自动",
+    "1": "前",
+    "2": "后",
+    "3": "左",
+    "4": "右",
+    "5": "上",
+    "6": "下",
+    "7": "前左 45°",
+    "8": "前右 45°",
+    "9": "后左 45°",
+    "10": "后右 45°",
+    "11": "0-6 视角合集",
+    "12": "0-10 视角合集",
+  },
 };
 
 function fieldLabel(column: string): string {
@@ -498,7 +801,8 @@ function isIsoDateColumn(column: string, value: unknown): value is string {
 
 function formatTableCell(column: string, value: unknown): string {
   if (value === null || value === undefined || value === "") return "—";
-  if (typeof value === "string" && VALUE_LABELS[column]?.[value]) return VALUE_LABELS[column][value];
+  const mappedValue = VALUE_LABELS[column]?.[String(value)];
+  if (mappedValue) return mappedValue;
   if (isIsoDateColumn(column, value)) return new Date(value).toLocaleString();
   if (typeof value === "boolean") return value ? "是" : "否";
   if (column === "bytes" && typeof value === "number") return `${(value / 1024 / 1024).toFixed(2)} MB`;
@@ -684,7 +988,7 @@ function ConversationHistoryList({
 
 function paramSummary(params: Record<string, unknown> | null): { label: string; value: string }[] {
   if (!params) return [];
-  return ["size", "quality", "n", "background", "output_format", "moderation"]
+  return ["size", "quality", "view_angle", "multi_view_grid", "n", "background", "output_format", "moderation"]
     .filter((key) => params[key] !== undefined && params[key] !== null && params[key] !== "")
     .map((key) => ({ label: fieldLabel(key), value: formatTableCell(key, params[key]) }));
 }
@@ -1010,7 +1314,7 @@ function UserDataPanel() {
 function UpstreamsTab() {
   const [list, setList] = useState<UpstreamChannel[]>([]);
   const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState<{ name: string; base_url: string; api_key: string; priority: number; supports_edit: boolean; timeout_seconds: number }>({ name: "", base_url: "", api_key: "", priority: 0, supports_edit: true, timeout_seconds: 300 });
+  const [form, setForm] = useState<{ name: string; base_url: string; api_key: string; priority: number; supports_edit: boolean; auto_switch_enabled: boolean; timeout_seconds: number }>({ name: "", base_url: "", api_key: "", priority: 0, supports_edit: true, auto_switch_enabled: false, timeout_seconds: 300 });
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
@@ -1022,7 +1326,7 @@ function UpstreamsTab() {
     try {
       await api.createUpstream(form);
       setShowAdd(false);
-      setForm({ name: "", base_url: "", api_key: "", priority: 0, supports_edit: true, timeout_seconds: 300 });
+      setForm({ name: "", base_url: "", api_key: "", priority: 0, supports_edit: true, auto_switch_enabled: false, timeout_seconds: 300 });
       load();
     } catch (e: any) {
       setError(e.message || "添加渠道失败");
@@ -1030,11 +1334,31 @@ function UpstreamsTab() {
   };
 
   const handleToggle = async (ch: UpstreamChannel) => {
+    if (ch.is_default && ch.enabled) return;
     try {
       await api.updateUpstream(ch.id, { enabled: !ch.enabled });
       load();
     } catch (e: any) {
       setError(e.message || "更新渠道状态失败");
+    }
+  };
+
+  const handleSetDefault = async (ch: UpstreamChannel) => {
+    try {
+      await api.setDefaultUpstream(ch.id);
+      load();
+    } catch (e: any) {
+      setError(e.message || "设置默认渠道失败");
+    }
+  };
+
+  const handleAutoSwitch = async (ch: UpstreamChannel) => {
+    if (ch.is_default) return;
+    try {
+      await api.updateUpstream(ch.id, { auto_switch_enabled: !ch.auto_switch_enabled });
+      load();
+    } catch (e: any) {
+      setError(e.message || "更新自动切换失败");
     }
   };
 
@@ -1057,15 +1381,27 @@ function UpstreamsTab() {
           <div key={ch.id} className="flex items-center gap-3 rounded-[12px] bg-white/[0.04] p-3">
             <div className={cls("h-2 w-2 rounded-full", ch.enabled ? "bg-emerald-400" : "bg-white/20")} />
             <div className="flex-1 min-w-0">
-              <div className="text-[13px] font-medium">{ch.name} <span className="text-white/30 text-[11px]">优先级 {ch.priority}</span></div>
+              <div className="flex flex-wrap items-center gap-1.5 text-[13px] font-medium">
+                <span>{ch.name}</span>
+                <span className="text-white/30 text-[11px]">优先级 {ch.priority}</span>
+                {ch.is_default && <span className="rounded bg-lime-400/15 px-1.5 py-0.5 text-[10px] text-lime-200">默认</span>}
+                {!ch.is_default && ch.auto_switch_enabled && <span className="rounded bg-sky-400/15 px-1.5 py-0.5 text-[10px] text-sky-200">自动切换</span>}
+                {!ch.enabled && <span className="rounded bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-white/35">已禁用</span>}
+              </div>
               <div className="text-[11px] font-mono text-white/40 truncate">{ch.base_url}</div>
               <div className="text-[11px] text-white/30">凭证: {ch.api_key_masked} · 超时 {ch.timeout_seconds}s · 并发 {ch.max_concurrent}</div>
             </div>
-            <div className="flex gap-1.5">
-              <button onClick={() => handleToggle(ch)} className={cls("rounded px-2 py-1 text-[11px]", ch.enabled ? "bg-red-500/20 hover:bg-red-500/30" : "bg-emerald-500/20 hover:bg-emerald-500/30")}>
+            <div className="flex flex-wrap justify-end gap-1.5">
+              <button disabled={ch.is_default} onClick={() => handleSetDefault(ch)} className={cls("rounded px-2 py-1 text-[11px]", ch.is_default ? "bg-white/[0.05] text-white/30" : "bg-lime-400/15 text-lime-200 hover:bg-lime-400/25")}>
+                {ch.is_default ? "当前默认" : "设为默认"}
+              </button>
+              <button disabled={ch.is_default} onClick={() => handleAutoSwitch(ch)} className={cls("rounded px-2 py-1 text-[11px]", ch.is_default ? "bg-white/[0.05] text-white/25" : ch.auto_switch_enabled ? "bg-sky-400/20 text-sky-100 hover:bg-sky-400/30" : "bg-white/[0.06] text-white/55 hover:bg-white/10")}>
+                {ch.auto_switch_enabled ? "关闭自动切换" : "开启自动切换"}
+              </button>
+              <button disabled={ch.is_default && ch.enabled} onClick={() => handleToggle(ch)} className={cls("rounded px-2 py-1 text-[11px]", ch.is_default && ch.enabled ? "bg-white/[0.05] text-white/25" : ch.enabled ? "bg-red-500/20 hover:bg-red-500/30" : "bg-emerald-500/20 hover:bg-emerald-500/30")}>
                 {ch.enabled ? "禁用" : "启用"}
               </button>
-              <button onClick={() => handleDelete(ch.id)} className="rounded bg-red-500/20 px-2 py-1 text-[11px] hover:bg-red-500/30">删除</button>
+              <button disabled={ch.is_default} onClick={() => handleDelete(ch.id)} className={cls("rounded px-2 py-1 text-[11px]", ch.is_default ? "bg-white/[0.05] text-white/25" : "bg-red-500/20 hover:bg-red-500/30")}>删除</button>
             </div>
           </div>
         ))}
@@ -1092,6 +1428,10 @@ function UpstreamsTab() {
             <label className="flex items-center gap-2 text-[12px] text-white/40">
               <input type="checkbox" checked={form.supports_edit} onChange={(e) => setForm({ ...form, supports_edit: e.target.checked })} />
               支持编辑（inpainting）
+            </label>
+            <label className="flex items-center gap-2 text-[12px] text-white/40">
+              <input type="checkbox" checked={form.auto_switch_enabled} onChange={(e) => setForm({ ...form, auto_switch_enabled: e.target.checked })} />
+              加入自动切换候选
             </label>
             <div className="flex justify-end gap-2">
               <button onClick={() => setShowAdd(false)} className="rounded-[8px] bg-white/[0.06] px-4 py-2 text-[13px]">取消</button>
@@ -1228,6 +1568,7 @@ export function AdminPage() {
       <div className="min-h-0 flex-1 overflow-y-auto rounded-[28px] bg-white/[0.02] p-3 sm:p-4 [scrollbar-color:rgba(255,255,255,0.16)_transparent] [scrollbar-width:thin]">
         {tab === "dashboard" && <DashboardTab />}
         {tab === "users" && <UsersTab />}
+        {tab === "announcements" && <AnnouncementsTab />}
         {tab === "logs" && <LogsTab />}
         {tab === "images" && <ImagesTab />}
         {tab === "data" && <UserDataPanel />}

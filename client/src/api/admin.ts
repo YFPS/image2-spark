@@ -18,6 +18,8 @@ export type DashboardStats = {
   today_active_users: number;
   total_images_generated: number;
   today_images_generated: number;
+  total_generation_requests: number;
+  today_generation_requests: number;
   total_credits_consumed: number;
   today_credits_consumed: number;
 };
@@ -73,6 +75,8 @@ export type UpstreamChannel = {
   base_url: string;
   api_key_masked: string;
   enabled: boolean;
+  is_default: boolean;
+  auto_switch_enabled: boolean;
   priority: number;
   supports_edit: boolean;
   max_concurrent: number;
@@ -103,6 +107,23 @@ export type UpstreamHealth = {
   recent_failures: number;
   recent_failure_rate: number;
   recent_p95_latency_ms: number | null;
+};
+
+export type AdminAnnouncement = {
+  id: number;
+  title: string;
+  content: string;
+  link_url: string | null;
+  link_label: string | null;
+  enabled: boolean;
+  pinned: boolean;
+  priority: number;
+  starts_at: string | null;
+  ends_at: string | null;
+  created_by: number | null;
+  updated_by: number | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type Paged<T> = { items: T[]; total: number; page: number; page_size: number };
@@ -196,6 +217,41 @@ export const getUserTransactions = (id: number, page?: number) =>
     `/users/${id}/transactions?page=${page || 1}`,
   );
 
+// ===== Announcements =====
+export type AnnouncementInput = {
+  title: string;
+  content: string;
+  link_url?: string | null;
+  link_label?: string | null;
+  enabled?: boolean;
+  pinned?: boolean;
+  priority?: number;
+  starts_at?: string | null;
+  ends_at?: string | null;
+};
+
+export const getAnnouncements = (p: { page?: number; page_size?: number; search?: string; enabled?: boolean } = {}) => {
+  const q = new URLSearchParams();
+  if (p.page) q.set("page", String(p.page));
+  if (p.page_size) q.set("page_size", String(p.page_size));
+  if (p.search) q.set("search", p.search);
+  if (p.enabled !== undefined) q.set("enabled", String(p.enabled));
+  return api<Paged<AdminAnnouncement>>(`/announcements?${q}`);
+};
+
+export const createAnnouncement = (data: AnnouncementInput) =>
+  api<AdminAnnouncement>("/announcements", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
+  });
+
+export const updateAnnouncement = (id: number, data: Partial<AnnouncementInput>) =>
+  api<AdminAnnouncement>(`/announcements/${id}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
+  });
+
+export const deleteAnnouncement = (id: number) =>
+  api<{ ok: boolean }>(`/announcements/${id}`, { method: "DELETE" });
+
 // ===== Logs =====
 export const getAccessLogs = (p: { page?: number; user_id?: number; path?: string; status_code?: number }) => {
   const q = new URLSearchParams();
@@ -266,17 +322,20 @@ export const getUpstreams = () => api<UpstreamChannel[]>("/upstreams");
 
 export const createUpstream = (data: {
   name: string; base_url: string; api_key: string; enabled?: boolean;
-  priority?: number; supports_edit?: boolean; max_concurrent?: number; timeout_seconds?: number;
+  auto_switch_enabled?: boolean; priority?: number; supports_edit?: boolean; max_concurrent?: number; timeout_seconds?: number;
 }) => api<UpstreamChannel>("/upstreams", {
   method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
 });
 
 export const updateUpstream = (id: number, data: Partial<{
   name: string; base_url: string; api_key: string; enabled: boolean;
-  priority: number; supports_edit: boolean; max_concurrent: number; timeout_seconds: number;
+  auto_switch_enabled: boolean; priority: number; supports_edit: boolean; max_concurrent: number; timeout_seconds: number;
 }>) => api<UpstreamChannel>(`/upstreams/${id}`, {
   method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
 });
+
+export const setDefaultUpstream = (id: number) =>
+  api<UpstreamChannel>(`/upstreams/${id}/set-default`, { method: "POST" });
 
 export const deleteUpstream = (id: number) => api<{ ok: boolean }>(`/upstreams/${id}`, { method: "DELETE" });
 

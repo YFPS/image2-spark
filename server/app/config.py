@@ -25,28 +25,6 @@ class Settings:
         self.openai_base_url_backup: str = os.getenv(
             "OPENAI_BASE_URL_BACKUP", ""
         ).strip().rstrip("/")
-        # 抠图模型（rembg，仅 SEGMENT_BACKEND=rembg 时生效）
-        self.rembg_model: str = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
-        # 抠图后端：grabcut（默认，复杂海报场景表现好）/ rembg（v1，简单贴纸场景）
-        self.segment_backend: str = (
-            os.getenv("SEGMENT_BACKEND", "grabcut").strip().lower() or "grabcut"
-        )
-        self.sam_checkpoint: str = os.getenv("SAM_CHECKPOINT", "").strip()
-        self.sam_model_type: str = os.getenv("SAM_MODEL_TYPE", "vit_b").strip() or "vit_b"
-        self.sam_device: str = os.getenv("SAM_DEVICE", "auto").strip().lower() or "auto"
-        # MobileSAM 后端（SEGMENT_BACKEND=mobile_sam 时生效）
-        # 默认权重路径相对仓库根：server/models/mobile_sam/mobile_sam.pt
-        default_mobile_ckpt = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "models", "mobile_sam", "mobile_sam.pt",
-        )
-        self.mobile_sam_checkpoint: str = (
-            os.getenv("MOBILE_SAM_CHECKPOINT", "").strip() or default_mobile_ckpt
-        )
-        self.mobile_sam_device: str = (
-            os.getenv("MOBILE_SAM_DEVICE", "auto").strip().lower() or "auto"
-        )
-
         # ===== auth-foundation =====
         # 运行环境：development / production；生产时启动校验更严
         self.app_env: str = os.getenv("APP_ENV", "development").strip().lower() or "development"
@@ -107,12 +85,10 @@ class Settings:
         self.rate_limit_global: str = os.getenv("RATE_LIMIT_GLOBAL", "120/minute")
         # 生图/改图：按用户 id 限频，挡已登录用户烧 API key
         self.rate_limit_generate: str = os.getenv("RATE_LIMIT_GENERATE", "6/minute")
-        # 抠图 ML 推理：CPU 密集，限严点
-        self.rate_limit_segment: str = os.getenv("RATE_LIMIT_SEGMENT", "12/minute")
         # 注册：按 IP，防批量造号
         self.rate_limit_register: str = os.getenv("RATE_LIMIT_REGISTER", "3/hour")
 
-        # 上传字节硬限（10 MB），edit / brush-cutout 单文件不可超
+        # 上传字节硬限（10 MB），edit 单文件不可超
         self.upload_max_bytes: int = int(os.getenv("UPLOAD_MAX_BYTES", str(10 * 1024 * 1024)))
 
         # ===== 邮箱验证 / 邮件 provider（auth P2） =====

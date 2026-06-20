@@ -2,7 +2,6 @@
 import { useEffect, type ReactNode } from "react";
 import { useAuth } from "./AuthContext";
 import { AuthOverlay } from "./AuthOverlay";
-import { UserBadge } from "./UserBadge";
 
 export function AuthGate({ children }: { children: ReactNode }) {
   const { status } = useAuth();
@@ -39,7 +38,6 @@ export function AuthGate({ children }: { children: ReactNode }) {
   return (
     <div className="relative min-h-screen">
       {children}
-      <UserBadge />
       <VerifyFlashToast />
     </div>
   );

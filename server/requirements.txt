@@ -4,17 +4,6 @@ httpx==0.27.2
 python-dotenv==1.0.1
 pydantic==2.9.2
 python-multipart>=0.0.9
-# ML 抠图（rembg + 间接依赖 onnxruntime / Pillow / numpy / scikit-image / scipy / pymatting）
-# 仅锁 rembg；其余由 rembg 间接拉，避免与 Python 3.13 上 numpy 兼容性冲突
-rembg==2.0.75
-Pillow>=10.0.0
-numpy>=2.0.0
-onnxruntime>=1.18.0
-opencv-python-headless>=4.10.0.84
-
-# Optional for SEGMENT_BACKEND=sam:
-# torch / torchvision installed for your CUDA or CPU environment
-# git+https://github.com/facebookresearch/segment-anything.git
 
 # auth-foundation
 SQLAlchemy>=2.0,<2.1

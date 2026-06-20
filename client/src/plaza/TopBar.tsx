@@ -1,7 +1,6 @@
 import { SearchIcon, FilterIcon } from "./icons";
 
-// 顶栏：仅保留页面标题 + 搜索框 + 筛选/排序按钮。
-// 原"新建项目 / 通知 / 头像"已由 App 主侧栏承担，避免重复。
+// 顶栏：仅保留页面标题、搜索框与筛选/排序按钮。
 
 type Props = {
   searchQuery: string;

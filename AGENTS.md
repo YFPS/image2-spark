@@ -4,13 +4,13 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## 项目概览
 
-image2 是一个 AI 图像生成 SaaS 的"节点画布编辑器"原型：前端用 React + WebGL 渲染液态玻璃风格的节点工作流，后端用 FastAPI 代理 `gpt-image-2` 文生图 / 图生图（inpainting），并提供本地 ML 抠图与 PSD 导出工具链。
+image2 是一个 AI 图像生成 SaaS 的"节点画布编辑器"原型：前端用 React + WebGL 渲染液态玻璃风格的节点工作流，后端用 FastAPI 代理 `gpt-image-2` 文生图 / 图生图（inpainting），并提供 PSD 导出工具链。
 
 - `client/` — React 18 + Vite + TypeScript + Tailwind，自实现 WebGL2 多通道液态玻璃着色器
-- `server/` — FastAPI，封装 OpenAI 兼容上游 + 本地 CV/ML 抠图
+- `server/` — FastAPI，封装 OpenAI 兼容上游、用户/积分、公告与生成记录
 - `tools/` — 纯 Python PSD 写出器（与服务无依赖）
 - `tests/` — 仓库根 `tools/` 的单测；`server/tests/` 是 server 端单测
-- `docs/specs/` — 关键功能的设计稿（gpt-image-2 接入、inpainting、抠图后端、贴纸裁剪等），改动这些功能前应先读对应 spec
+- `docs/specs/` — 关键功能的设计稿（gpt-image-2 接入、inpainting 等），改动这些功能前应先读对应 spec
 - `DESIGN.md` — 节点画布的视觉与交互铁律（灰阶 UI、端口语义色、电黄唯一 CTA）
 
 ## 常用命令
@@ -48,7 +48,7 @@ server 单测在 `server/` 目录下运行（用 `from app import ...`）：
 
 ```bash
 cd server
-python -m unittest tests.test_segment_service
+python -m unittest tests.test_announcements
 ```
 
 ## 后端端口规则
@@ -61,18 +61,16 @@ Get-NetTCPConnection -LocalPort 8000 | Select-Object -Expand OwningProcess | For
 
 ## 后端架构要点
 
-`server/app/main.py` 极薄：只装 CORS + 挂 `routers/images.py`。所有业务在 `routers/images.py`，由四个职责清晰的模块支撑：
+`server/app/main.py` 极薄：只装 CORS + 挂业务 router。图像生成业务在 `routers/images.py`，由三个职责清晰的模块支撑：
 
-- `config.py` — 从 `server/.env` 读取所有运行时配置（`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`SEGMENT_BACKEND`、SAM/MobileSAM 权重路径、JWT/SMTP/限流 等）。`get_settings()` 用 `lru_cache` 单例化。
+- `config.py` — 从 `server/.env` 读取所有运行时配置（`OPENAI_API_KEY`、`OPENAI_BASE_URL`、JWT/SMTP/限流 等）。`get_settings()` 用 `lru_cache` 单例化。
 - `openai_client.py` — 透传到上游 `/v1/images/generations` 与 `/v1/images/edits` 的 httpx 客户端，统一抛 `UpstreamError` / `UpstreamTimeout`。
 - `schemas.py` — Pydantic 请求/响应模型。`GenerateRequest.size` 的校验规则较严（16 的倍数、单边 ≤3840、总像素 655360–8294400、宽高比 ≤3:1，允许全角 `×`）；新增字段时这里是真相源。
-- `segment_service.py` — ML 抠图。后端可由 env `SEGMENT_BACKEND` 切换：`grabcut`（默认，OpenCV GrabCut + 用户矩形 prompt，复杂海报场景）/ `rembg`（v1 显著性分割）/ `sam` / `mobile_sam`。所有模型 session/predictor 都是**懒加载单例**——不要在 import 期加载，启动路径必须保持轻。CPU 密集推理在路由里用 `asyncio.to_thread` 推到线程池。
 
 ### 路由约定（`/api/images/*`）
 
 - `POST /generate` — 文生图。**模型固定为 `gpt-image-2`**：路由内 `upstream_model = "gpt-image-2"` 硬编码，前端传的 `model` 字段会被忽略，上游也不做 size→model 的分流（中转商当前只提供这一个模型变体）。如果未来再出现 4K / vip 等变体，再在 `routers/images.py` 里加路由策略并同步改 `/edit`。
 - `POST /edit` — Inpainting / 多参考图编辑（multipart：`image[]`、`mask`、`prompt`、`size`、…）。同样把 model 硬编码为 `gpt-image-2`，与 `/generate` 保持一致。
-- `POST /segment` — 给定 `url + x,y,w,h + padding_factor`，返回紧凑 bbox 的透明 PNG。
 - `GET /proxy-image?url=` — 反代上游 CDN 图片，规避前端 canvas 跨域 taint。强约束：仅 https、Content-Type 必须 `image/*`、单文件 ≤ 50 MB。
 
 错误返回统一形如 `{"error": {"code", "message", "upstream_status"?}}`。新增路由时沿用同一形状。

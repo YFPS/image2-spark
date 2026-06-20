@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "./AuthContext";
 
-export function UserBadge() {
+export function UserBadge({ embedded = false }: { embedded?: boolean }) {
   const { user, logout, resendVerificationEmail, verificationEmailSent } = useAuth();
   const [open, setOpen] = useState(false);
   const [resending, setResending] = useState(false);
@@ -27,10 +27,10 @@ export function UserBadge() {
     <div
       ref={ref}
       style={{
-        position: "fixed",
-        top: 14,
-        right: 18,
-        zIndex: 900,
+        position: embedded ? "relative" : "fixed",
+        top: embedded ? undefined : 14,
+        right: embedded ? undefined : 18,
+        zIndex: embedded ? 1 : 900,
         fontFamily:
           "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
       }}

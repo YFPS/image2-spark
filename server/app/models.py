@@ -233,6 +233,43 @@ class AuditLog(Base):
     )
 
 
+class Announcement(Base):
+    """站内公告：前台顶部公告条读取，后台管理员维护。"""
+
+    __tablename__ = "announcements"
+    __table_args__ = (
+        Index("idx_ann_active_order", "enabled", "pinned", "priority", "id"),
+        Index("idx_ann_time_window", "starts_at", "ends_at"),
+        {
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+            "mysql_collate": "utf8mb4_0900_ai_ci",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(MyBigInt(unsigned=True), primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(80), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    link_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    link_label: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[int | None] = mapped_column(MyBigInt(unsigned=True), nullable=True)
+    updated_by: Mapped[int | None] = mapped_column(MyBigInt(unsigned=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.current_timestamp()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=func.current_timestamp(),
+        server_onupdate=func.current_timestamp(),
+    )
+
+
 class UpstreamChannel(Base):
     """上游 API 渠道配置"""
 
@@ -246,6 +283,8 @@ class UpstreamChannel(Base):
     base_url: Mapped[str] = mapped_column(String(512), nullable=False)
     api_key: Mapped[str] = mapped_column(String(256), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    auto_switch_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     priority: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
     supports_edit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
     max_concurrent: Mapped[int] = mapped_column(nullable=False, default=10, server_default="10")

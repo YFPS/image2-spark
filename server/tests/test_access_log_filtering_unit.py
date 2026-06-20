@@ -1,7 +1,14 @@
 import unittest
 
 from app.middleware.access_log import should_skip_access_log
-from app.routers.admin import dashboard, dau_stats, is_internal_access_path, traffic_stats
+from app.routers.admin import (
+    IMAGE_GENERATION_ACCESS_PATHS,
+    _image_generation_access_log_filter,
+    dashboard,
+    dau_stats,
+    is_internal_access_path,
+    traffic_stats,
+)
 
 
 class _FakeResult:
@@ -110,8 +117,28 @@ class AdminStatsFilteringTests(unittest.IsolatedAsyncioTestCase):
         await dashboard(admin=object(), db=db)
 
         sql_statements = _access_log_sql(db.statements)
-        self.assertEqual(len(sql_statements), 1)
+        self.assertEqual(len(sql_statements), 3)
         self.assert_filters_internal_access_paths(sql_statements[0])
+
+    async def test_dashboard_image_count_uses_image_url_length(self):
+        db = _FakeDb()
+        await dashboard(admin=object(), db=db)
+
+        sql_statements = [str(statement) for statement in db.statements if "messages" in str(statement)]
+        self.assertEqual(len(sql_statements), 2)
+        for sql in sql_statements:
+            with self.subTest(sql=sql):
+                self.assertIn("json_length", sql.lower())
+                self.assertNotIn("count(messages.id)", sql.lower())
+
+    def test_generation_request_filter_only_counts_generate_and_edit_paths(self):
+        self.assertEqual(
+            IMAGE_GENERATION_ACCESS_PATHS,
+            ("/api/images/generate", "/api/images/edit"),
+        )
+        sql = str(_image_generation_access_log_filter())
+
+        self.assertIn("access_logs.path IN", sql)
 
 
 if __name__ == "__main__":

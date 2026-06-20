@@ -34,9 +34,7 @@ import {
   type GenerateImage as ApiImage,
   type GenerateUsage as ApiUsage,
 } from "./api/gptImage";
-import { StickerCropperModal, ScissorsIcon } from "./components/StickerCropperModal";
 import { MaskBrushModal } from "./components/MaskBrushModal";
-import { AiCutoutModal } from "./components/AiCutoutModal";
 import ModelPlaza from "./ModelPlaza";
 import { useAuth } from "./auth/AuthContext";
 import { useConversations } from "./conversation/useConversations";
@@ -45,6 +43,7 @@ import { TimelineQuickJump } from "./conversation/TimelineQuickJump";
 import { conversationHasPendingGeneration } from "./conversation/pendingGeneration";
 import { extractConversationResults } from "./conversation/conversationResults";
 import { RefImagesStrip } from "./components/RefImagesStrip";
+import { TopGlassBar } from "./components/TopGlassBar";
 import { REF_MAX, extractImageFilesFromEvent, fileToDataURL } from "./utils/imageInput";
 import { useIsMobile } from "./hooks/useMediaQuery";
 import { MobileCanvas } from "./components/mobile/MobileCanvas";
@@ -77,6 +76,22 @@ const PREVIEW_BAR_GAP = 12;
 const PREVIEW_BAR_H = 56;
 const PREVIEW_CARD_H = PREVIEW_GLASS_H + PREVIEW_BAR_GAP + PREVIEW_BAR_H;
 const GENERATE_CARD_RADIUS = 28;
+const TOP_GLASS_BAR_PADDING = 8;
+const VIEW_ANGLE_OPTIONS = [
+  { value: "0", label: "0 · 自动" },
+  { value: "1", label: "1 · 前" },
+  { value: "2", label: "2 · 后" },
+  { value: "3", label: "3 · 左" },
+  { value: "4", label: "4 · 右" },
+  { value: "5", label: "5 · 上" },
+  { value: "6", label: "6 · 下" },
+  { value: "7", label: "7 · 前左 45°" },
+  { value: "8", label: "8 · 前右 45°" },
+  { value: "9", label: "9 · 后左 45°" },
+  { value: "10", label: "10 · 后右 45°" },
+  { value: "11", label: "11 · 0-6 视角合集" },
+  { value: "12", label: "12 · 0-10 视角合集" },
+] as const;
 
 /* ---------- 类型 & 数据 ---------- */
 type Point = { x: number; y: number };
@@ -795,6 +810,7 @@ function SimpleGenerateView({
   const recentCardRef = useRef<HTMLDivElement | null>(null);
   const chatPanelRef = useRef<HTMLDivElement | null>(null);
   const assistantDockRef = useRef<HTMLDivElement | null>(null);
+  const topGlassBarRef = useRef<HTMLDivElement | null>(null);
   const pageShellRef = useRef<HTMLDivElement | null>(null);
   // 聊天消息滚动容器 —— TimelineQuickJump 用它读 scrollTop 算"当前消息"并 scrollTo 跳转
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
@@ -838,6 +854,7 @@ function SimpleGenerateView({
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const [shellGlassShapes, setShellGlassShapes] = useState<GlassShape[]>([]);
   const [pageGlassShapes, setPageGlassShapes] = useState<GlassShape[]>([]);
+  const [topBarInset, setTopBarInset] = useState({ left: 96, right: 12 });
   const assistantShouldShow = shouldShowAiAssistant(activeNav);
   // ModelPlaza 内部自管选型；这里只读 selectedModel 用于顶部副标显示
   const [selectedModel] = useState<"gpt-image-2" | "banana-nano-pro">("gpt-image-2");
@@ -857,8 +874,6 @@ function SimpleGenerateView({
   const [results, setResults] = useState<ApiImage[]>([]);
   const [usage, setUsage] = useState<ApiUsage | null>(null);
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
-  const [cropperSrc, setCropperSrc] = useState<string | null>(null);
-  const [aiCutoutSrc, setAiCutoutSrc] = useState<string | null>(null);
 
   // 对话气泡数据：派生自 useConversations()
   // 服务端 message → UI ChatMsg；进行中的 AI 回复用本地 pendingBubble 占位
@@ -937,6 +952,8 @@ function SimpleGenerateView({
   const [format, setFormat] = useState("png");
   const [compression, setCompression] = useState(80);
   const [moderation, setModeration] = useState("auto");
+  const [viewAngle, setViewAngle] = useState("0");
+  const [multiViewGrid, setMultiViewGrid] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [customW, setCustomW] = useState(1024);
   const [customH, setCustomH] = useState(1024);
@@ -959,6 +976,7 @@ function SimpleGenerateView({
   // 参考图配套的 inpainting 蒙版（OpenAI 协议：alpha=0=AI 重画）
   const [refMaskBlob, setRefMaskBlob] = useState<Blob | null>(null);
   const [maskModalOpen, setMaskModalOpen] = useState(false);
+  const isMultiViewAngle = viewAngle === "11" || viewAngle === "12";
 
   // 兼容旧逻辑的别名 / 上限（REF_MAX 已从 utils/imageInput 导入）
   const refImage = refImages[0]?.dataURL ?? null;
@@ -1138,6 +1156,8 @@ function SimpleGenerateView({
                 output_compression: format !== "png" ? compression : undefined,
                 moderation,
                 reasoning: mode === "reasoning",
+                view_angle: Number(viewAngle),
+                multi_view_grid: isMultiViewAngle && multiViewGrid,
               },
               convId!,
             ),
@@ -1211,6 +1231,7 @@ function SimpleGenerateView({
     const refs: RefObject<HTMLElement | null>[] =
       activeNav === "studio"
         ? [
+            topGlassBarRef,
             sidebarRef,
             referenceCardRef,
             settingsCardRef,
@@ -1219,9 +1240,33 @@ function SimpleGenerateView({
             chatPanelRef,
           ]
         : activeNav === "models"
-          ? [sidebarRef]
-          : [sidebarRef, pageShellRef];
+          ? [topGlassBarRef, sidebarRef]
+          : [topGlassBarRef, sidebarRef, pageShellRef];
     const measure = () => {
+      const viewportWidth = window.innerWidth;
+      const contentLeftRect =
+        activeNav === "studio"
+          ? referenceCardRef.current?.getBoundingClientRect()
+          : pageShellRef.current?.getBoundingClientRect();
+      const sidebarRect = sidebarRef.current?.getBoundingClientRect();
+      const fallbackLeft = (sidebarRect?.right ?? 92) + 12;
+      const rawLeft =
+        viewportWidth < 960
+          ? 12
+          : (contentLeftRect?.left ?? fallbackLeft) - TOP_GLASS_BAR_PADDING;
+      const rightAnchor =
+        assistantShouldShow
+          ? chatPanelRef.current ?? assistantDockRef.current
+          : pageShellRef.current;
+      const rightRect = rightAnchor?.getBoundingClientRect();
+      const rawRight = viewportWidth - (rightRect?.right ?? viewportWidth - 12);
+      const right = Math.max(12, Math.round(rawRight));
+      const leftLimit = Math.max(12, viewportWidth - right - 520);
+      const left = Math.max(12, Math.round(Math.min(rawLeft, leftLimit)));
+      setTopBarInset((prev) =>
+        prev.left === left && prev.right === right ? prev : { left, right },
+      );
+
       const shapes = refs
         .map((ref) => ref.current)
         .filter((el): el is HTMLElement => el !== null)
@@ -1245,7 +1290,12 @@ function SimpleGenerateView({
   }, [activeNav, sidebarExpanded, assistantShouldShow]);
 
   return (
-    <main className="relative z-20 h-[calc(100vh-76px)] overflow-hidden">
+    <>
+      <TopGlassBar
+        ref={topGlassBarRef}
+        style={{ left: topBarInset.left, right: topBarInset.right }}
+      />
+      <main className="relative z-20 h-[calc(100vh-76px)] overflow-hidden">
       <div className="flex h-full gap-3 px-3 pb-4 pt-3">
         {/* 左侧导航栏（可展开） */}
         <aside
@@ -1369,19 +1419,11 @@ function SimpleGenerateView({
         ) : (
         <div className="flex min-w-0 flex-1 flex-col gap-3">
           {/* 顶部标题（贴外、不进卡） */}
-          <div className="flex shrink-0 items-center justify-between gap-3 px-1">
+          <div className="flex shrink-0 items-center gap-3 px-1">
             <div className="flex items-center gap-3">
               <StatusDot selected />
               <h1 className="text-[22px] font-medium leading-tight text-white/95">图像生成</h1>
               <span className="text-[12px] text-white/45">借助 AI 创作画面 · {selectedModel === "gpt-image-2" ? "gpt-image-2" : "banana-nano-pro"}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <button className="rounded-full bg-white/[0.04] px-3 py-1.5 text-[12px] font-medium text-white/72 hover:bg-white/[0.08]">
-                我的模板
-              </button>
-              <button className="rounded-full bg-accent-foxo px-3.5 py-1.5 text-[12px] font-semibold text-[#0D0D0D] shadow-generate-glow">
-                + 新建项目
-              </button>
             </div>
           </div>
 
@@ -1626,6 +1668,38 @@ function SimpleGenerateView({
                   />
                 </SettingsGroup>
 
+                <SettingsGroup label="视角">
+                  <select
+                    value={viewAngle}
+                    onChange={(e) => setViewAngle(e.target.value)}
+                    disabled={mode === "edit"}
+                    className="h-8 w-full rounded-full border border-white/[0.04] bg-[#141418] px-3 text-[12px] font-medium text-white/78 outline-none transition-[border-color,background-color,opacity] hover:bg-[#17171b] focus:border-white/[0.14] disabled:cursor-not-allowed disabled:opacity-45"
+                  >
+                    {VIEW_ANGLE_OPTIONS.map((item) => (
+                      <option
+                        key={item.value}
+                        value={item.value}
+                        className="bg-[#141418] text-white"
+                      >
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </SettingsGroup>
+
+                <SettingsGroup label="多视图布局">
+                  <label className="flex h-8 items-center gap-2 rounded-full border border-white/[0.04] bg-[#141418] px-3 text-[12px] font-medium text-white/72 transition-[border-color,background-color,opacity] hover:bg-[#17171b] has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-45">
+                    <input
+                      type="checkbox"
+                      checked={multiViewGrid}
+                      onChange={(e) => setMultiViewGrid(e.target.checked)}
+                      disabled={mode === "edit" || !isMultiViewAngle}
+                      className="h-3.5 w-3.5 accent-[#E8FF00]"
+                    />
+                    <span>多宫格留白</span>
+                  </label>
+                </SettingsGroup>
+
                 <SettingsGroup label="数量">
                   <PillGroup
                     value={n}
@@ -1826,8 +1900,6 @@ function SimpleGenerateView({
                   images={results}
                   format={format}
                   onPreview={setPreviewSrc}
-                  onCropper={setCropperSrc}
-                  onAiCutout={setAiCutoutSrc}
                 />
               )}
             </div>
@@ -2083,18 +2155,10 @@ function SimpleGenerateView({
         )}
       </div>
 
+      </main>
+
       {/* 图片预览遮罩 */}
       {previewSrc && <ImagePreviewModal src={previewSrc} onClose={() => setPreviewSrc(null)} />}
-
-      {/* 抠图工具 */}
-      {cropperSrc && (
-        <StickerCropperModal src={cropperSrc} onClose={() => setCropperSrc(null)} />
-      )}
-
-      {/* AI 抠图工具（笔刷涂主体 → AI 重绘为透明背景） */}
-      {aiCutoutSrc && (
-        <AiCutoutModal imageSrc={aiCutoutSrc} onClose={() => setAiCutoutSrc(null)} />
-      )}
 
       {/* Inpainting 蒙版编辑 */}
       {maskModalOpen && refImage && (
@@ -2108,7 +2172,7 @@ function SimpleGenerateView({
           onClose={() => setMaskModalOpen(false)}
         />
       )}
-    </main>
+    </>
   );
 }
 
@@ -2483,15 +2547,11 @@ function ResultImage({
   format,
   large,
   onPreview,
-  onCropper,
-  onAiCutout,
 }: {
   img: ApiImage;
   format: string;
   large?: boolean;
   onPreview?: (src: string) => void;
-  onCropper?: (src: string) => void;
-  onAiCutout?: (src: string) => void;
 }) {
   const rawSrc = imageToSrc(img, format);
   const src = rawSrc ? safeImageSrc(rawSrc) : null;
@@ -2510,20 +2570,6 @@ function ResultImage({
 
       {src && (
         <div className="absolute right-3 top-3 z-20 flex items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100">
-          <button
-            onClick={() => onCropper?.(src)}
-            title="抠图（ML 框选）"
-            className="grid h-9 w-9 place-items-center rounded-full border border-white/[0.10] bg-[#17171b]/82 text-white/82 backdrop-blur-md hover:bg-[#1e1e22]"
-          >
-            <ScissorsIcon />
-          </button>
-          <button
-            onClick={() => onAiCutout?.(src)}
-            title="AI 抠图（笔刷涂主体 · 重绘透明背景）"
-            className="grid h-9 w-9 place-items-center rounded-full border border-accent-foxo/40 bg-accent-foxo/12 text-accent-foxo backdrop-blur-md hover:bg-accent-foxo/20"
-          >
-            <SparkleSmallIcon />
-          </button>
           <button
             onClick={() => onPreview?.(src)}
             title="放大预览"
@@ -2660,7 +2706,7 @@ function ImagePreviewModal({ src, onClose }: { src: string; onClose: () => void 
   return (
     <div
       onClick={onClose}
-      className="fixed inset-0 z-[100] grid place-items-center bg-black/95"
+      className="fixed inset-0 z-[1000] grid place-items-center bg-black/95"
     >
       {/* overflow-hidden 容器：图被 transform 放大后超出部分由容器裁掉，实现"局部放大窥视" */}
       <div
@@ -2715,14 +2761,10 @@ function ResultGallery({
   images,
   format,
   onPreview,
-  onCropper,
-  onAiCutout,
 }: {
   images: ApiImage[];
   format: string;
   onPreview?: (src: string) => void;
-  onCropper?: (src: string) => void;
-  onAiCutout?: (src: string) => void;
 }) {
   const [selectedIdx, setSelectedIdx] = useState(0);
 
@@ -2751,8 +2793,6 @@ function ResultGallery({
             format={format}
             large
             onPreview={onPreview}
-            onCropper={onCropper}
-            onAiCutout={onAiCutout}
           />
         </div>
       </div>
@@ -2770,8 +2810,6 @@ function ResultGallery({
           format={format}
           large
           onPreview={onPreview}
-          onCropper={onCropper}
-          onAiCutout={onAiCutout}
         />
         {/* 左右切换 */}
         {images.length > 1 && (

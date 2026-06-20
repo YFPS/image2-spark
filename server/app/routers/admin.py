@@ -16,6 +16,10 @@ from ..admin_schemas import (
     AdminAuditLogListOut,
     AdminAccessLogItem,
     AdminAccessLogListOut,
+    AdminAnnouncementCreate,
+    AdminAnnouncementItem,
+    AdminAnnouncementListOut,
+    AdminAnnouncementUpdate,
     AdminCreditAdjust,
     AdminLogItem,
     AdminLogListOut,
@@ -39,6 +43,7 @@ from ..deps import require_admin
 from ..models import (
     AccessLog,
     AdminLog,
+    Announcement,
     AuditLog,
     Conversation,
     CreditTransaction,
@@ -58,6 +63,7 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 _INTERNAL_ACCESS_PATHS = {"/api/health", "/docs", "/openapi.json", "/redoc"}
 _INTERNAL_ACCESS_PREFIXES = ("/api/admin", "/static")
+IMAGE_GENERATION_ACCESS_PATHS = ("/api/images/generate", "/api/images/edit")
 
 
 ADMIN_DATA_TABLES: dict[str, dict[str, Any]] = {
@@ -144,6 +150,13 @@ def _external_access_log_filter():
         clauses.append(AccessLog.path != prefix)
         clauses.append(not_(AccessLog.path.like(f"{prefix}/%")))
     return and_(*clauses)
+
+
+def _image_generation_access_log_filter():
+    return and_(
+        _external_access_log_filter(),
+        AccessLog.path.in_(IMAGE_GENERATION_ACCESS_PATHS),
+    )
 
 
 def _mask_key(key: str) -> str:
@@ -321,6 +334,33 @@ async def _write_admin_log(
     await db.flush()
 
 
+def _to_admin_announcement_item(row: Announcement) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "title": row.title,
+        "content": row.content,
+        "link_url": row.link_url,
+        "link_label": row.link_label,
+        "enabled": row.enabled,
+        "pinned": row.pinned,
+        "priority": row.priority,
+        "starts_at": row.starts_at,
+        "ends_at": row.ends_at,
+        "created_by": row.created_by,
+        "updated_by": row.updated_by,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def _validate_announcement_window(starts_at: datetime | None, ends_at: datetime | None) -> None:
+    if starts_at and ends_at and ends_at <= starts_at:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "invalid_time_window", "message": "结束时间必须晚于开始时间"}},
+        )
+
+
 # ===== 仪表盘 =====
 
 
@@ -344,13 +384,27 @@ async def dashboard(
     )).scalar() or 0
 
     total_images = (await db.execute(
-        select(func.count(Message.id)).where(Message.role == "ai").where(Message.status == "done")
-    )).scalar() or 0
-    today_images = (await db.execute(
-        select(func.count(Message.id))
+        select(func.coalesce(func.sum(func.json_length(Message.image_urls)), 0))
         .where(Message.role == "ai")
         .where(Message.status == "done")
+        .where(Message.image_urls.isnot(None))
+    )).scalar() or 0
+    today_images = (await db.execute(
+        select(func.coalesce(func.sum(func.json_length(Message.image_urls)), 0))
+        .where(Message.role == "ai")
+        .where(Message.status == "done")
+        .where(Message.image_urls.isnot(None))
         .where(Message.created_at >= today_start)
+    )).scalar() or 0
+
+    generation_request_filter = _image_generation_access_log_filter()
+    total_generation_requests = (await db.execute(
+        select(func.count(AccessLog.id)).where(generation_request_filter)
+    )).scalar() or 0
+    today_generation_requests = (await db.execute(
+        select(func.count(AccessLog.id)).where(
+            and_(generation_request_filter, AccessLog.created_at >= today_start)
+        )
     )).scalar() or 0
 
     total_credits = (await db.execute(
@@ -367,8 +421,10 @@ async def dashboard(
         total_users=total_users,
         today_registrations=today_reg,
         today_active_users=today_active,
-        total_images_generated=total_images,
-        today_images_generated=today_images,
+        total_images_generated=int(total_images),
+        today_images_generated=int(today_images),
+        total_generation_requests=total_generation_requests,
+        today_generation_requests=today_generation_requests,
         total_credits_consumed=total_credits,
         today_credits_consumed=today_credits,
     )
@@ -1041,7 +1097,168 @@ async def list_admin_data_table_rows(
     }
 
 
+# ===== 公告管理 =====
+
+
+@router.get("/announcements", response_model=AdminAnnouncementListOut)
+async def list_announcements(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: str | None = Query(None),
+    enabled: bool | None = Query(None),
+) -> AdminAnnouncementListOut:
+    _ = admin
+    where = []
+    if search:
+        like = f"%{search}%"
+        where.append(or_(Announcement.title.like(like), Announcement.content.like(like)))
+    if enabled is not None:
+        where.append(Announcement.enabled == enabled)
+
+    stmt = select(Announcement).where(and_(*where)) if where else select(Announcement)
+    total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar() or 0
+    rows = (await db.execute(
+        stmt.order_by(Announcement.pinned.desc(), Announcement.priority.desc(), Announcement.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )).scalars().all()
+
+    return AdminAnnouncementListOut(
+        items=[AdminAnnouncementItem(**_to_admin_announcement_item(row)) for row in rows],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.post("/announcements", response_model=AdminAnnouncementItem)
+async def create_announcement(
+    body: AdminAnnouncementCreate,
+    request: Request,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> AdminAnnouncementItem:
+    ann = Announcement(
+        title=body.title,
+        content=body.content,
+        link_url=body.link_url,
+        link_label=body.link_label,
+        enabled=body.enabled,
+        pinned=body.pinned,
+        priority=body.priority,
+        starts_at=body.starts_at,
+        ends_at=body.ends_at,
+        created_by=admin.id,
+        updated_by=admin.id,
+    )
+    db.add(ann)
+    await db.flush()
+    await _write_admin_log(
+        db, admin.id, "create_announcement", _client_ip(request),
+        "announcement", ann.id, {"title": ann.title},
+    )
+    await db.commit()
+    await db.refresh(ann)
+    return AdminAnnouncementItem(**_to_admin_announcement_item(ann))
+
+
+@router.put("/announcements/{announcement_id}", response_model=AdminAnnouncementItem)
+async def update_announcement(
+    announcement_id: int,
+    body: AdminAnnouncementUpdate,
+    request: Request,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> AdminAnnouncementItem:
+    ann = (await db.execute(
+        select(Announcement).where(Announcement.id == announcement_id)
+    )).scalar_one_or_none()
+    if ann is None:
+        raise HTTPException(status_code=404, detail={"error": {"code": "not_found"}})
+
+    fields = body.model_fields_set
+    next_starts_at = body.starts_at if "starts_at" in fields else ann.starts_at
+    next_ends_at = body.ends_at if "ends_at" in fields else ann.ends_at
+    _validate_announcement_window(next_starts_at, next_ends_at)
+
+    changes: dict[str, Any] = {}
+    for field in [
+        "title",
+        "content",
+        "link_url",
+        "link_label",
+        "enabled",
+        "pinned",
+        "priority",
+        "starts_at",
+        "ends_at",
+    ]:
+        if field in fields:
+            val = getattr(body, field)
+            setattr(ann, field, val)
+            changes[field] = val
+
+    if changes:
+        ann.updated_by = admin.id
+        ann.updated_at = datetime.utcnow()
+        await _write_admin_log(
+            db, admin.id, "update_announcement", _client_ip(request),
+            "announcement", announcement_id, changes,
+        )
+        await db.commit()
+        await db.refresh(ann)
+
+    return AdminAnnouncementItem(**_to_admin_announcement_item(ann))
+
+
+@router.delete("/announcements/{announcement_id}")
+async def delete_announcement(
+    announcement_id: int,
+    request: Request,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, bool]:
+    ann = (await db.execute(
+        select(Announcement).where(Announcement.id == announcement_id)
+    )).scalar_one_or_none()
+    if ann is None:
+        raise HTTPException(status_code=404, detail={"error": {"code": "not_found"}})
+
+    await _write_admin_log(
+        db, admin.id, "delete_announcement", _client_ip(request),
+        "announcement", announcement_id, {"title": ann.title},
+    )
+    await db.delete(ann)
+    await db.commit()
+    return {"ok": True}
+
+
 # ===== 上游渠道管理 =====
+
+
+def _to_upstream_channel_item(ch: UpstreamChannel) -> UpstreamChannelItem:
+    return UpstreamChannelItem(
+        id=ch.id,
+        name=ch.name,
+        base_url=ch.base_url,
+        api_key_masked=_mask_key(ch.api_key),
+        enabled=ch.enabled,
+        is_default=ch.is_default,
+        auto_switch_enabled=ch.auto_switch_enabled,
+        priority=ch.priority,
+        supports_edit=ch.supports_edit,
+        max_concurrent=ch.max_concurrent,
+        timeout_seconds=ch.timeout_seconds,
+        last_health_check=ch.last_health_check,
+        last_health_ok=ch.last_health_ok,
+        last_latency_ms=ch.last_latency_ms,
+        total_requests=ch.total_requests,
+        total_failures=ch.total_failures,
+        created_at=ch.created_at,
+        updated_at=ch.updated_at,
+    )
 
 
 @router.get("/upstreams", response_model=list[UpstreamChannelItem])
@@ -1052,23 +1269,7 @@ async def list_upstreams(
     rows = (await db.execute(
         select(UpstreamChannel).order_by(UpstreamChannel.priority.desc(), UpstreamChannel.id)
     )).scalars().all()
-    return [
-        UpstreamChannelItem(
-            id=r.id, name=r.name, base_url=r.base_url,
-            api_key_masked=_mask_key(r.api_key),
-            enabled=r.enabled, priority=r.priority,
-            supports_edit=r.supports_edit,
-            max_concurrent=r.max_concurrent,
-            timeout_seconds=r.timeout_seconds,
-            last_health_check=r.last_health_check,
-            last_health_ok=r.last_health_ok,
-            last_latency_ms=r.last_latency_ms,
-            total_requests=r.total_requests,
-            total_failures=r.total_failures,
-            created_at=r.created_at, updated_at=r.updated_at,
-        )
-        for r in rows
-    ]
+    return [_to_upstream_channel_item(r) for r in rows]
 
 
 @router.post("/upstreams", response_model=UpstreamChannelItem)
@@ -1080,9 +1281,15 @@ async def create_upstream(
 ) -> UpstreamChannelItem:
     # 加密存储 api_key（如果配置了加密密钥）
     stored_key = encrypt_api_key(body.api_key) if is_encryption_configured() else body.api_key
+    current_default = (await db.execute(
+        select(UpstreamChannel).where(UpstreamChannel.is_default == True).limit(1)  # noqa: E712
+    )).scalar_one_or_none()
+    should_be_default = current_default is None and body.enabled
     ch = UpstreamChannel(
         name=body.name, base_url=body.base_url, api_key=stored_key,
         enabled=body.enabled, priority=body.priority,
+        is_default=should_be_default,
+        auto_switch_enabled=False if should_be_default else body.auto_switch_enabled,
         supports_edit=body.supports_edit,
         max_concurrent=body.max_concurrent,
         timeout_seconds=body.timeout_seconds,
@@ -1094,20 +1301,7 @@ async def create_upstream(
     )
     await db.commit()
     await db.refresh(ch)
-    return UpstreamChannelItem(
-        id=ch.id, name=ch.name, base_url=ch.base_url,
-        api_key_masked=_mask_key(ch.api_key),
-        enabled=ch.enabled, priority=ch.priority,
-        supports_edit=ch.supports_edit,
-        max_concurrent=ch.max_concurrent,
-        timeout_seconds=ch.timeout_seconds,
-        last_health_check=ch.last_health_check,
-        last_health_ok=ch.last_health_ok,
-        last_latency_ms=ch.last_latency_ms,
-        total_requests=ch.total_requests,
-        total_failures=ch.total_failures,
-        created_at=ch.created_at, updated_at=ch.updated_at,
-    )
+    return _to_upstream_channel_item(ch)
 
 
 @router.put("/upstreams/{channel_id}", response_model=UpstreamChannelItem)
@@ -1123,9 +1317,14 @@ async def update_upstream(
     )).scalar_one_or_none()
     if ch is None:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found"}})
+    if body.enabled is False and ch.is_default:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "default_upstream_cannot_disable", "message": "默认上游不能直接禁用，请先设置另一个默认上游"}},
+        )
 
     changes: dict[str, Any] = {}
-    for field in ["name", "base_url", "api_key", "enabled", "priority",
+    for field in ["name", "base_url", "api_key", "enabled", "auto_switch_enabled", "priority",
                    "supports_edit", "max_concurrent", "timeout_seconds"]:
         val = getattr(body, field)
         if val is not None:
@@ -1145,20 +1344,33 @@ async def update_upstream(
         await db.commit()
         await db.refresh(ch)
 
-    return UpstreamChannelItem(
-        id=ch.id, name=ch.name, base_url=ch.base_url,
-        api_key_masked=_mask_key(ch.api_key),
-        enabled=ch.enabled, priority=ch.priority,
-        supports_edit=ch.supports_edit,
-        max_concurrent=ch.max_concurrent,
-        timeout_seconds=ch.timeout_seconds,
-        last_health_check=ch.last_health_check,
-        last_health_ok=ch.last_health_ok,
-        last_latency_ms=ch.last_latency_ms,
-        total_requests=ch.total_requests,
-        total_failures=ch.total_failures,
-        created_at=ch.created_at, updated_at=ch.updated_at,
+    return _to_upstream_channel_item(ch)
+
+
+@router.post("/upstreams/{channel_id}/set-default", response_model=UpstreamChannelItem)
+async def set_default_upstream(
+    channel_id: int,
+    request: Request,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> UpstreamChannelItem:
+    ch = (await db.execute(
+        select(UpstreamChannel).where(UpstreamChannel.id == channel_id)
+    )).scalar_one_or_none()
+    if ch is None:
+        raise HTTPException(status_code=404, detail={"error": {"code": "not_found"}})
+
+    await db.execute(update(UpstreamChannel).values(is_default=False))
+    ch.enabled = True
+    ch.is_default = True
+    ch.auto_switch_enabled = False
+    await _write_admin_log(
+        db, admin.id, "set_default_upstream", _client_ip(request),
+        "upstream", channel_id, {"name": ch.name, "base_url": ch.base_url},
     )
+    await db.commit()
+    await db.refresh(ch)
+    return _to_upstream_channel_item(ch)
 
 
 @router.delete("/upstreams/{channel_id}")
@@ -1173,6 +1385,11 @@ async def delete_upstream(
     )).scalar_one_or_none()
     if ch is None:
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found"}})
+    if ch.is_default:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "default_upstream_cannot_delete", "message": "默认上游不能直接删除，请先设置另一个默认上游"}},
+        )
     await _write_admin_log(
         db, admin.id, "delete_upstream", _client_ip(request),
         "upstream", channel_id, {"name": ch.name},

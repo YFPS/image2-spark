@@ -11,7 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
  *  - 导出层（不显示）：先用纯白填充，再用 destination-out 把"显示层有像素"的位置打成透明 → 得到
  *    标准 OpenAI inpainting mask（alpha=0=改、alpha=255=保）。
  *
- * 与 StickerCropperModal 一致：图片走 dataURL（refImage 本身就是 dataURL），不需要走代理。
+ * 图片走 dataURL（refImage 本身就是 dataURL），不需要走代理。
  */
 export function MaskBrushModal({
   imageSrc,
@@ -199,7 +199,7 @@ export function MaskBrushModal({
 
   return (
     <div
-      className="fixed inset-0 z-[100] grid place-items-center bg-black/82 backdrop-blur-md"
+      className="fixed inset-0 z-[1000] grid place-items-center bg-black/82 backdrop-blur-md"
       onClick={onClose}
     >
       <div

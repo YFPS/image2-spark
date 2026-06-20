@@ -30,6 +30,8 @@ class GenerateRequest(BaseModel):
     output_compression: int | None = Field(default=None, ge=0, le=100)
     moderation: ModerationT = "auto"
     reasoning: bool = Field(default=False, description="是否启用思考模式（gpt-image-2 reasoning）")
+    view_angle: int = Field(default=0, ge=0, le=12, description="视角选项：0 自动，1-6 基础方向，7-10 为 45° 斜向，11/12 为多视角合集")
+    multi_view_grid: bool = Field(default=False, description="多视图合集是否使用带间隙的多宫格布局")
 
     @field_validator("size")
     @classmethod
@@ -81,15 +83,21 @@ class ErrorResponse(BaseModel):
     error: ErrorDetail
 
 
-class SegmentRequest(BaseModel):
-    """抠图请求：源图 url + 用户矩形（自然像素坐标）"""
+class AnnouncementItem(BaseModel):
+    id: int
+    title: str
+    content: str
+    link_url: str | None = None
+    link_label: str | None = None
+    pinned: bool
+    priority: int
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    updated_at: datetime
 
-    url: str = Field(..., description="源图 https URL")
-    x: float = Field(..., ge=0)
-    y: float = Field(..., ge=0)
-    w: float = Field(..., ge=16)
-    h: float = Field(..., ge=16)
-    padding_factor: float = Field(default=1.0, ge=0, le=3)
+
+class AnnouncementListOut(BaseModel):
+    items: list[AnnouncementItem]
 
 
 # ===== auth-foundation =====

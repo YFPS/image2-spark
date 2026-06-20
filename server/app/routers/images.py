@@ -1,4 +1,4 @@
-"""/api/images/* 路由
+﻿"""/api/images/* 路由
 
 任务化生图链路（解决前端刷新丢结果的 bug）：
   1. /generate /edit 接收 conversation_id，在事务内插入一条 status='pending' 的 ai message
@@ -62,9 +62,7 @@ from ..schemas import (
     ErrorResponse,
     GenerateRequest,
     MessageOut,
-    SegmentRequest,
 )
-from ..segment_service import fetch_image_bytes, segment_brush_mobile_sam, segment_sync
 from ..upstream_monitoring import UpstreamAttempt, record_upstream_attempts
 
 limiter = get_limiter()
@@ -260,7 +258,7 @@ def _parse_upstream_images(
     data_list = upstream_json.get("data", []) or []
     urls: list[str] = []
     for item in data_list:
-        url = item.get("url")
+        url = _extract_upstream_image_url(item)
         if url:
             urls.append(url)
             continue
@@ -274,6 +272,21 @@ def _parse_upstream_images(
         "total_tokens": int(usage_raw.get("total_tokens", 0)),
     }
     return urls, usage, len(data_list)
+
+
+def _extract_upstream_image_url(item: dict[str, Any]) -> str | None:
+    """兼容 url / image_url / image_url.url 三种上游返回形态。"""
+    url = item.get("url")
+    if isinstance(url, str) and url:
+        return url
+    image_url = item.get("image_url")
+    if isinstance(image_url, str) and image_url:
+        return image_url
+    if isinstance(image_url, dict):
+        nested_url = image_url.get("url")
+        if isinstance(nested_url, str) and nested_url:
+            return nested_url
+    return None
 
 
 _DATA_IMAGE_RE = re.compile(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.*)$", re.DOTALL)
@@ -420,6 +433,10 @@ async def _update_upstream_stats(
     自动从环境变量创建一条默认渠道，确保监控面板始终有数据。
     """
     from ..models import UpstreamChannel
+    from ..upstream_channels import (
+        should_repair_upstream_channel_name,
+        upstream_channel_display_name,
+    )
 
     settings = get_settings()
     base_url = settings.openai_base_url
@@ -436,7 +453,7 @@ async def _update_upstream_stats(
             # 找不到则自动创建默认渠道（从环境变量）
             if ch is None:
                 ch = UpstreamChannel(
-                    name="默认上游",
+                    name=upstream_channel_display_name(base_url),
                     base_url=base_url,
                     api_key=settings.openai_api_key,
                     enabled=True,
@@ -447,6 +464,8 @@ async def _update_upstream_stats(
                 )
                 db.add(ch)
                 await db.flush()
+            elif should_repair_upstream_channel_name(ch.name, ch.base_url):
+                ch.name = upstream_channel_display_name(ch.base_url)
 
             ch.total_requests = (ch.total_requests or 0) + 1
             if not success:
@@ -488,10 +507,54 @@ async def _record_upstream_outcome(
 # ===== /generate =====
 
 
+VIEW_ANGLE_PROMPTS: dict[int, str] = {
+    1: "front view",
+    2: "back view",
+    3: "left side view",
+    4: "right side view",
+    5: "top view, overhead view",
+    6: "bottom view, low underside view",
+    7: "front-left 45-degree three-quarter view",
+    8: "front-right 45-degree three-quarter view",
+    9: "rear-left 45-degree three-quarter back view",
+    10: "rear-right 45-degree three-quarter back view",
+    11: "numbered multi-view reference sheet covering views 0 through 6: default/front/back/left/right/top/bottom",
+    12: "numbered multi-view reference sheet covering views 0 through 10: default/front/back/left/right/top/bottom plus four 45-degree three-quarter views",
+}
+
+MULTI_VIEW_GRID_ANGLES = {11, 12}
+
+
+def _apply_view_angle_prompt(prompt: str, view_angle: int) -> str:
+    """把前端数字视角转换成发给上游的提示词片段。"""
+    instruction = VIEW_ANGLE_PROMPTS.get(view_angle)
+    if not instruction:
+        return prompt
+    return f"{prompt}\n\nCamera/view instruction: {instruction}."
+
+
+def _apply_multi_view_grid_prompt(
+    prompt: str,
+    multi_view_grid: bool,
+    view_angle: int,
+) -> str:
+    """多视图合集开启多宫格时，追加便于裁剪的布局提示。"""
+    if not multi_view_grid or view_angle not in MULTI_VIEW_GRID_ANGLES:
+        return prompt
+    instruction = (
+        "create a clean multi-panel grid/contact sheet; each view must be isolated "
+        "in its own panel with clear visible gutters and crop-safe padding between panels; "
+        "use a simple neutral background, consistent subject scale, no overlapping subjects, "
+        "and keep any view labels small and away from the subject."
+    )
+    return f"{prompt}\n\nMulti-view grid instruction: {instruction}"
+
+
 async def _run_generate_task(
     ai_msg_id: int,
     conv_id: int,
     payload: dict[str, Any],
+    request_params: dict[str, Any],
     action_label: str,
     user_id: int,
     cost: int,
@@ -603,7 +666,7 @@ async def _run_generate_task(
         "model": upstream_json.get("model", payload.get("model")),
         "usage": usage,
         # 把请求参数也存一份方便 UI 还原
-        "request": {k: v for k, v in payload.items() if k != "prompt"},
+        "request": request_params,
     }
     await _finalize_message(
         factory, ai_msg_id, conv_id, ok=True, text=text,
@@ -635,9 +698,16 @@ async def generate(
     # 未验证邮箱用户不允许触发上游 API key 消耗
     require_verified_user(user)
     upstream_model = "gpt-image-2"
+    prompt_with_view = _apply_view_angle_prompt(req.prompt, req.view_angle)
+    prompt_with_layout = _apply_multi_view_grid_prompt(
+        prompt_with_view,
+        req.multi_view_grid,
+        req.view_angle,
+    )
+
     payload: dict[str, Any] = {
         "model": upstream_model,
-        "prompt": req.prompt,
+        "prompt": prompt_with_layout,
         "size": req.size,
         "quality": req.quality,
         "n": req.n,
@@ -649,6 +719,9 @@ async def generate(
         payload["reasoning"] = True
     if req.output_format in {"jpeg", "webp"} and req.output_compression is not None:
         payload["output_compression"] = req.output_compression
+    request_params = {k: v for k, v in payload.items() if k != "prompt"}
+    request_params["view_angle"] = req.view_angle
+    request_params["multi_view_grid"] = req.multi_view_grid
 
     # 鉴权 + 会话归属校验
     conv = await _load_owned_conv(db, user.id, conversation_id)
@@ -660,7 +733,7 @@ async def generate(
         raise _insufficient_credits(current=current_credits, need=cost)
 
     init_params = {
-        "request": {k: v for k, v in payload.items() if k != "prompt"},
+        "request": request_params,
         "cost": cost,
     }
     msg = await _create_pending_ai_msg(db, conv.id, init_params)
@@ -672,7 +745,7 @@ async def generate(
     # 启动后台任务（与请求生命周期解耦；持有强引用避免被 GC）
     _spawn_background_task(
         _run_generate_task(
-            msg.id, conv.id, payload,
+            msg.id, conv.id, payload, request_params,
             action_label="已生成",
             user_id=user.id, cost=cost,
         )
@@ -827,7 +900,7 @@ async def _run_edit_task(
 async def edit(
     request: Request,
     image: list[UploadFile] = File(..., description="参考图（1~N 张）；mask 仅对齐第 1 张"),
-    mask: UploadFile = File(..., description="mask PNG"),
+    mask: UploadFile | None = File(None, description="可选 mask PNG；常规参考图改图可不传"),
     prompt: str = Form(..., min_length=1),
     conversation_id: int = Form(..., description="目标会话 id"),
     model: str = Form("gpt-image-2"),
@@ -874,22 +947,24 @@ async def edit(
         image_payloads.append(
             (up.filename or f"image-{idx}.png", b, up.content_type or "image/png")
         )
-    mask_bytes = await mask.read()
-    if not mask_bytes:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"code": "validation_error", "message": "mask 为空"}},
-        )
-    if len(mask_bytes) > max_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail={
-                "error": {
-                    "code": "file_too_large",
-                    "message": f"mask 超出 {max_bytes // (1024*1024)} MB 上限",
-                }
-            },
-        )
+    mask_bytes: bytes | None = None
+    if mask is not None:
+        mask_bytes = await mask.read()
+        if not mask_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"code": "validation_error", "message": "mask 为空"}},
+            )
+        if len(mask_bytes) > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "error": {
+                        "code": "file_too_large",
+                        "message": f"mask 超出 {max_bytes // (1024*1024)} MB 上限",
+                    }
+                },
+            )
 
     # 鉴权 + 会话归属校验
     conv = await _load_owned_conv(db, user.id, conversation_id)
@@ -908,19 +983,21 @@ async def edit(
         "n": str(n),
         "background": background,
     }
-    # 多图 → 自动切到飞鱼（feiyuai 支持多图）；单图 → 走 tabcode 主上游
+    # 多图沿用旧兼容策略：主上游不是飞鱼时尝试备用飞鱼；主上游是飞鱼时仍走主上游。
     multi = len(image_payloads) > 1
     if multi:
         files: list[tuple[str, tuple[str, bytes, str]]] = [
             ("image", p) for p in image_payloads
         ]
-        files.append(("mask", ("mask.png", mask_bytes, "image/png")))
+        if mask_bytes is not None:
+            files.append(("mask", ("mask.png", mask_bytes, "image/png")))
         dropped_refs = 0
     else:
         dropped_refs = 0
         main_payload = image_payloads[0]
         files = [("image", main_payload)]
-        files.append(("mask", ("mask.png", mask_bytes, "image/png")))
+        if mask_bytes is not None:
+            files.append(("mask", ("mask.png", mask_bytes, "image/png")))
 
     init_params = {
         "mode": "edit",
@@ -945,7 +1022,7 @@ async def edit(
     return JSONResponse(content=_to_msg_out(msg).model_dump(mode="json"))
 
 
-# ===== proxy-image / segment / brush-cutout =====
+# ===== proxy-image =====
 
 
 @router.get("/assets/{filename}")
@@ -1129,103 +1206,6 @@ def _chunk_iter(data: bytes, size: int = 64 * 1024):
     """将 bytes 分块 yield，避免 StreamingResponse 一次发完大包"""
     for i in range(0, len(data), size):
         yield data[i : i + size]
-
-
-@router.post("/segment")
-@limiter.limit(lambda: get_settings().rate_limit_segment, key_func=user_id_key)
-async def segment(
-    request: Request,
-    req: SegmentRequest,
-    user: User = Depends(get_current_user),
-) -> Response:
-    """ML 抠图：在用户矩形周围 ROI 扩展，分割模型，紧凑 bbox 返回透明 PNG"""
-    _ = user  # 仅鉴权用
-    try:
-        img_bytes, _ct = await fetch_image_bytes(req.url)
-    except ValueError as e:
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"code": "validation_error", "message": str(e)}},
-        )
-    except httpx.TimeoutException as e:
-        logger.warning("segment 拉取图片超时 url=%s error=%s", req.url, e)
-        return JSONResponse(
-            status_code=504,
-            content={"error": {"code": "image_fetch_timeout", "message": "图片加载超时，请稍后重试"}},
-        )
-    except httpx.HTTPError as e:
-        logger.warning("segment 拉取图片失败 url=%s error=%s", req.url, e)
-        return JSONResponse(
-            status_code=502,
-            content={"error": {"code": "image_fetch_failed", "message": "图片加载失败，请稍后重试"}},
-        )
-
-    try:
-        png_bytes = await asyncio.to_thread(
-            segment_sync, img_bytes, req.x, req.y, req.w, req.h, req.padding_factor,
-        )
-    except ValueError as e:
-        return JSONResponse(
-            status_code=422,
-            content={"error": {"code": "validation_error", "message": str(e)}},
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.exception("segment 失败")
-        return JSONResponse(
-            status_code=500,
-            content={"error": {"code": "model_error", "message": "图片处理失败，请稍后重试"}},
-        )
-
-    return Response(content=png_bytes, media_type="image/png")
-
-
-@router.post("/brush-cutout")
-@limiter.limit(lambda: get_settings().rate_limit_segment, key_func=user_id_key)
-async def brush_cutout(
-    request: Request,
-    image: UploadFile = File(..., description="原图（PNG/JPEG）"),
-    mask: UploadFile = File(..., description="笔刷蒙版 PNG"),
-    subject_type: str = Form("auto"),
-    user: User = Depends(get_current_user),
-) -> Response:
-    """笔刷 mask → 精细抠图（MobileSAM）"""
-    _ = subject_type, user
-    settings = get_settings()
-    max_bytes = settings.upload_max_bytes
-    image_bytes = await image.read()
-    mask_bytes = await mask.read()
-    if not image_bytes or not mask_bytes:
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"code": "validation_error", "message": "image 或 mask 为空"}},
-        )
-    if len(image_bytes) > max_bytes or len(mask_bytes) > max_bytes:
-        return JSONResponse(
-            status_code=413,
-            content={
-                "error": {
-                    "code": "file_too_large",
-                    "message": f"上传超过 {max_bytes // (1024*1024)} MB 上限",
-                }
-            },
-        )
-
-    try:
-        png_bytes = await asyncio.to_thread(
-            segment_brush_mobile_sam, image_bytes, mask_bytes
-        )
-    except ValueError as e:
-        return JSONResponse(
-            status_code=422,
-            content={"error": {"code": "validation_error", "message": str(e)}},
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.exception("brush-cutout 失败")
-        return JSONResponse(
-            status_code=500,
-            content={"error": {"code": "model_error", "message": "图片处理失败，请稍后重试"}},
-        )
-    return Response(content=png_bytes, media_type="image/png")
 
 
 # ===== 显式吸收未使用导入（为兼容旧 import 暴露空 alias） =====
