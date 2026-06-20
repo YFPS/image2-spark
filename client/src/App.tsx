@@ -27,11 +27,14 @@ import { GlassControls, loadStoredParams, type GlassParams } from "./GlassContro
 import {
   generateImages,
   editImage,
+  fetchImageModels,
   imageToSrc,
   safeImageSrc,
+  FALLBACK_IMAGE_MODELS,
   GenerateError,
   customerErrorMessage,
   type GenerateImage as ApiImage,
+  type ImageModelItem,
   type GenerateUsage as ApiUsage,
 } from "./api/gptImage";
 import { MaskBrushModal } from "./components/MaskBrushModal";
@@ -857,7 +860,16 @@ function SimpleGenerateView({
   const [topBarInset, setTopBarInset] = useState({ left: 96, right: 12 });
   const assistantShouldShow = shouldShowAiAssistant(activeNav);
   // ModelPlaza 内部自管选型；这里只读 selectedModel 用于顶部副标显示
-  const [selectedModel] = useState<"gpt-image-2" | "banana-nano-pro">("gpt-image-2");
+  const [imageModels, setImageModels] = useState<ImageModelItem[]>(FALLBACK_IMAGE_MODELS);
+  const [selectedModelId, setSelectedModelId] = useState("image2");
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const selectedImageModel = useMemo(
+    () =>
+      imageModels.find((model) => model.id === selectedModelId) ??
+      imageModels.find((model) => model.available) ??
+      FALLBACK_IMAGE_MODELS[0],
+    [imageModels, selectedModelId],
+  );
   const [chatInput, setChatInput] = useState("");
 
   // 输入框 auto-grow：内容变化时按 scrollHeight 重置高度；max-h-[50vh] 在 className 兜底
@@ -867,6 +879,26 @@ function SimpleGenerateView({
     el.style.height = "auto";
     el.style.height = `${el.scrollHeight}px`;
   }, [chatInput]);
+
+  useEffect(() => {
+    let alive = true;
+    fetchImageModels()
+      .then((items) => {
+        if (!alive || items.length === 0) return;
+        setImageModels(items);
+        setSelectedModelId((prev) =>
+          items.some((model) => model.id === prev && model.available)
+            ? prev
+            : (items.find((model) => model.available)?.id ?? prev),
+        );
+      })
+      .catch(() => {
+        // 模型目录失败时继续使用本地兜底，生成接口仍由后端校验。
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // 出图状态
   const [loading, setLoading] = useState(false);
@@ -960,6 +992,12 @@ function SimpleGenerateView({
 
   // 模式：generate / edit / reasoning
   const [mode, setMode] = useState<"generate" | "edit" | "reasoning">("generate");
+  useEffect(() => {
+    if (mode === "edit" || mode === "reasoning") {
+      setSelectedModelId("image2");
+      setModelMenuOpen(false);
+    }
+  }, [mode]);
   // Edit 模式的"目标图片"：从当前对话最后一张 done AI 消息派生（刷新后自动认出）
   // 注意：与 setResults/setUsage 那组 in-memory 预览状态分开，因为预览受 format 影响
   const lastResultSrc = useMemo<string | null>(() => {
@@ -1047,10 +1085,18 @@ function SimpleGenerateView({
   const isGenerating = loading || hasServerPending;
   // 未验证邮箱用户禁止生成（后端有 403 兜底，这里提前 disable 避免无效请求）
   const verificationRequired = user?.verification_required ?? false;
+  const selectedModelSupportsMode =
+    mode === "edit"
+      ? selectedImageModel.supports_edit
+      : mode === "reasoning"
+        ? selectedImageModel.supports_reasoning
+        : true;
+  const selectedModelCanRun = selectedImageModel.available && selectedModelSupportsMode;
   const canGenerate =
     !isGenerating && (ratio !== "custom" || customSizeError == null) && chatInput.trim().length > 0
     && (mode !== "edit" || lastResultSrc != null || refImages.length > 0)
-    && !verificationRequired;
+    && !verificationRequired
+    && selectedModelCanRun;
 
   const handleGenerate = async () => {
     const prompt = chatInput.trim();
@@ -1062,6 +1108,11 @@ function SimpleGenerateView({
     }
 
     // 确保有一个 conversation：没有就立刻在服务端创建一个空 session
+    if (!selectedModelCanRun) {
+      setErrorMsg("当前模型不可用，或不支持当前生成模式");
+      return;
+    }
+
     let convId = conversations.currentId;
     if (convId == null) {
       try {
@@ -1146,7 +1197,7 @@ function SimpleGenerateView({
           Array.from({ length: count }, () =>
             generateImages(
               {
-                model: "gpt-image-2",
+                model: selectedImageModel.id,
                 prompt,
                 size: apiSize,
                 quality,
@@ -1423,7 +1474,7 @@ function SimpleGenerateView({
             <div className="flex items-center gap-3">
               <StatusDot selected />
               <h1 className="text-[22px] font-medium leading-tight text-white/95">图像生成</h1>
-              <span className="text-[12px] text-white/45">借助 AI 创作画面 · {selectedModel === "gpt-image-2" ? "gpt-image-2" : "banana-nano-pro"}</span>
+              <span className="text-[12px] text-white/45">借助 AI 创作画面 · {selectedImageModel.label}</span>
             </div>
           </div>
 
@@ -1622,7 +1673,9 @@ function SimpleGenerateView({
               >
               <div className="mb-3 flex shrink-0 items-center justify-between">
                 <span className="text-[13px] font-medium text-white/92">参数</span>
-                <span className="text-[11px] text-white/35">gpt-image-2</span>
+                <span className="max-w-[150px] truncate text-[11px] text-white/35">
+                  {selectedImageModel.label}
+                </span>
               </div>
 
               <div className="min-h-0 flex-1 overflow-y-auto rounded-[20px] border border-white/[0.04] bg-[#1e1e22] p-4 [scrollbar-color:rgba(255,255,255,0.16)_transparent] [scrollbar-width:thin] [scrollbar-gutter:stable]">
@@ -2058,6 +2111,17 @@ function SimpleGenerateView({
                 onAddFiles={(files) => appendRefImagesFromFiles(files)}
               />
             )}
+            <ModelSwitcher
+              models={imageModels}
+              selectedId={selectedImageModel.id}
+              mode={mode}
+              open={modelMenuOpen}
+              onOpenChange={setModelMenuOpen}
+              onSelect={(id) => {
+                setSelectedModelId(id);
+                setModelMenuOpen(false);
+              }}
+            />
             {/* 输入条 */}
             <div
               className={`relative flex shrink-0 items-start gap-2 rounded-[18px] border bg-[#141418] px-3 py-2 transition-colors ${
@@ -2137,6 +2201,8 @@ function SimpleGenerateView({
                       ? "生成中"
                       : verificationRequired
                         ? "请先验证邮箱后再生成图片"
+                        : !selectedModelCanRun
+                          ? "当前模型不可用，或不支持当前模式"
                         : "输入提示词后回车"
                 }
                 className="grid h-8 w-8 place-items-center rounded-full bg-accent-foxo text-[#0D0D0D] disabled:opacity-40"
@@ -2177,6 +2243,138 @@ function SimpleGenerateView({
 }
 
 /* 参数分组：标签在左、分段控件在右，整体对齐成表格行 */
+function ModelSwitcher({
+  models,
+  selectedId,
+  mode,
+  open,
+  onOpenChange,
+  onSelect,
+}: {
+  models: ImageModelItem[];
+  selectedId: string;
+  mode: "generate" | "edit" | "reasoning";
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSelect: (id: string) => void;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const selected =
+    models.find((model) => model.id === selectedId) ??
+    models.find((model) => model.available) ??
+    FALLBACK_IMAGE_MODELS[0];
+  const modeSupported = (model: ImageModelItem) =>
+    mode === "edit"
+      ? model.supports_edit
+      : mode === "reasoning"
+        ? model.supports_reasoning
+        : true;
+  const selectedUsable = selected.available && modeSupported(selected);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        onOpenChange(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onOpenChange(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open, onOpenChange]);
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        onClick={() => onOpenChange(!open)}
+        className="flex h-9 w-full items-center gap-2 rounded-[14px] border border-white/[0.06] bg-[#141418] px-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition-colors hover:border-white/[0.12]"
+      >
+        <span
+          className="h-2 w-2 shrink-0 rounded-full"
+          style={{
+            backgroundColor: selected.accent,
+            boxShadow: selectedUsable ? `0 0 10px ${selected.accent}` : "none",
+            opacity: selectedUsable ? 1 : 0.45,
+          }}
+        />
+        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-white/86">
+          {selected.label}
+        </span>
+        <span className="rounded-full bg-white/[0.05] px-2 py-1 text-[10px] text-white/58">
+          {selected.cost_per_image} 积分/张
+        </span>
+        <span
+          className={`hidden rounded-full px-2 py-1 text-[10px] sm:inline ${
+            selectedUsable
+              ? "bg-accent-foxo/12 text-accent-foxo"
+              : "bg-white/[0.04] text-white/38"
+          }`}
+        >
+          {selectedUsable ? "可用" : selected.available ? "不支持当前模式" : "未启用"}
+        </span>
+        <Chevron dir={open ? "up" : "down"} size={8} className="shrink-0 text-white/45" />
+      </button>
+
+      {open && (
+        <div className="absolute bottom-full left-0 right-0 z-40 mb-2 overflow-hidden rounded-[14px] border border-white/[0.08] bg-[#101014]/95 p-1 shadow-[0_24px_60px_rgba(0,0,0,0.58)] backdrop-blur-xl">
+          {models.map((model) => {
+            const supported = modeSupported(model);
+            const disabled = !model.available || !supported;
+            const active = model.id === selected.id;
+            return (
+              <button
+                key={model.id}
+                type="button"
+                disabled={disabled}
+                onClick={() => onSelect(model.id)}
+                className={`flex w-full items-center gap-2 rounded-[10px] px-2.5 py-2 text-left transition-colors ${
+                  active
+                    ? "bg-white/[0.075]"
+                    : disabled
+                      ? "opacity-50"
+                      : "hover:bg-white/[0.055]"
+                }`}
+              >
+                <span
+                  className="h-2 w-2 shrink-0 rounded-full"
+                  style={{
+                    backgroundColor: model.accent,
+                    boxShadow: !disabled ? `0 0 9px ${model.accent}` : "none",
+                  }}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[12px] font-medium text-white/86">
+                    {model.label}
+                  </span>
+                  <span className="block truncate text-[10.5px] text-white/38">
+                    {!model.configured
+                      ? "未配置"
+                      : !model.available
+                        ? "未启用"
+                        : !supported
+                          ? "不支持当前模式"
+                          : model.description}
+                  </span>
+                </span>
+                <span className="shrink-0 rounded-full border border-white/[0.06] px-2 py-1 text-[10px] text-white/60">
+                  {model.cost_per_image} 积分
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SettingsGroup({
   label,
   children,

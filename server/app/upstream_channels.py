@@ -3,6 +3,13 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
+TEXT_TO_IMAGE_ONLY_PROVIDERS = {
+    "Pollinations.AI",
+    "Cloudflare Workers AI",
+    "Google Gemini",
+    "Hugging Face",
+}
+
 GENERIC_UPSTREAM_CHANNEL_NAMES = {"默认上游", "备用上游"}
 
 
@@ -13,6 +20,19 @@ def upstream_provider_name(base_url: str) -> str:
         return "飞鱼 AI"
     if host == "api2.tabcode.cc" or host.endswith(".tabcode.cc"):
         return "TabCode"
+    if host in {
+        "image.pollinations.ai",
+        "gen.pollinations.ai",
+        "pollinations.ai",
+        "www.pollinations.ai",
+    }:
+        return "Pollinations.AI"
+    if host == "api.cloudflare.com":
+        return "Cloudflare Workers AI"
+    if host == "generativelanguage.googleapis.com":
+        return "Google Gemini"
+    if host == "router.huggingface.co" or host.endswith(".huggingface.co"):
+        return "Hugging Face"
     if host == "api.openai.com":
         return "OpenAI"
     return host or "未知上游"
@@ -22,6 +42,11 @@ def upstream_channel_display_name(base_url: str, role: str = "primary") -> str:
     """生成后台渠道列表使用的默认显示名。"""
     prefix = "备用上游" if role == "backup" else "默认上游"
     return f"{prefix} · {upstream_provider_name(base_url)}"
+
+
+def upstream_channel_supports_edit(base_url: str) -> bool:
+    """判断当前适配器是否已经支持图生图 / 改图。"""
+    return upstream_provider_name(base_url) not in TEXT_TO_IMAGE_ONLY_PROVIDERS
 
 
 def should_repair_upstream_channel_name(current_name: str | None, base_url: str) -> bool:

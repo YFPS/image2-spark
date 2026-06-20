@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -55,6 +56,7 @@ from ..models import (
     User,
 )
 from ..schemas import MessageOut
+from ..upstream_channels import upstream_channel_supports_edit
 from ..upstream_monitoring import UpstreamAttempt, summarize_upstream_metrics
 from ..works_service import filter_displayable_image_urls
 
@@ -1290,7 +1292,7 @@ async def create_upstream(
         enabled=body.enabled, priority=body.priority,
         is_default=should_be_default,
         auto_switch_enabled=False if should_be_default else body.auto_switch_enabled,
-        supports_edit=body.supports_edit,
+        supports_edit=body.supports_edit and upstream_channel_supports_edit(body.base_url),
         max_concurrent=body.max_concurrent,
         timeout_seconds=body.timeout_seconds,
     )
@@ -1335,6 +1337,11 @@ async def update_upstream(
             else:
                 setattr(ch, field, val)
                 changes[field] = val
+
+    if ("base_url" in changes or "supports_edit" in changes) and not upstream_channel_supports_edit(ch.base_url):
+        if ch.supports_edit:
+            ch.supports_edit = False
+            changes["supports_edit"] = False
 
     if changes:
         await _write_admin_log(
@@ -1476,6 +1483,68 @@ def _is_upstream_health_ok(status_code: int) -> bool:
     return 200 <= status_code < 400
 
 
+def _upstream_health_probe(
+    base_url: str, api_key: str
+) -> tuple[str, str, dict[str, str], dict[str, Any] | None]:
+    normalized = base_url.rstrip("/")
+    host = (urlparse(normalized).hostname or "").lower()
+    if host in {
+        "image.pollinations.ai",
+        "gen.pollinations.ai",
+        "pollinations.ai",
+        "www.pollinations.ai",
+    }:
+        return "GET", "https://image.pollinations.ai/models", {}, None
+    if host == "api.cloudflare.com":
+        return (
+            "POST",
+            normalized,
+            {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            {"prompt": "health check image", "seed": 1, "steps": 4},
+        )
+    if host == "generativelanguage.googleapis.com":
+        return (
+            "POST",
+            normalized,
+            {"x-goog-api-key": api_key, "Content-Type": "application/json"},
+            {
+                "contents": [{"parts": [{"text": "health check image"}]}],
+                "generationConfig": {
+                    "responseFormat": {"image": {"aspectRatio": "1:1"}}
+                },
+            },
+        )
+    if host == "router.huggingface.co" and urlparse(normalized).path.strip("/").startswith("fal-ai/"):
+        return (
+            "POST",
+            normalized,
+            {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            {
+                "prompt": "health check image",
+                "image_size": {"width": 256, "height": 256},
+                "seed": 1,
+            },
+        )
+    if host in {"router.huggingface.co", "api-inference.huggingface.co"}:
+        return (
+            "POST",
+            normalized,
+            {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Accept": "image/png",
+            },
+            {
+                "inputs": "health check image",
+                "parameters": {"width": 256, "height": 256},
+            },
+        )
+    return "GET", f"{normalized}/models", {"Authorization": f"Bearer {api_key}"}, None
+
+
 @router.post("/upstreams/{channel_id}/health-check")
 async def health_check_upstream(
     channel_id: int,
@@ -1495,9 +1564,11 @@ async def health_check_upstream(
     plain_key = decrypt_api_key(ch.api_key) if is_encryption_configured() else ch.api_key
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{ch.base_url}/models", headers={
-                "Authorization": f"Bearer {plain_key}",
-            })
+            method, url, headers, json_body = _upstream_health_probe(ch.base_url, plain_key)
+            if method == "POST":
+                resp = await client.post(url, headers=headers, json=json_body)
+            else:
+                resp = await client.get(url, headers=headers)
             ok = _is_upstream_health_ok(resp.status_code)
     except Exception:
         ok = False

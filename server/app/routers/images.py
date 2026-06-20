@@ -48,6 +48,13 @@ from ..deps import get_current_user
 from ..audit_service import InsufficientCreditsError, apply_credit_delta
 from ..email_verification_service import require_verified_user
 from ..generated_assets_service import persist_generated_assets
+from ..model_catalog import (
+    IMAGE_MODEL_DEFINITIONS,
+    calculate_image_model_cost,
+    get_image_model,
+    image_model_matches_base_url,
+    normalize_image_model_id,
+)
 from ..models import Conversation, Message, User
 from ..openai_client import (
     UpstreamError,
@@ -61,9 +68,12 @@ from ..schemas import (
     ErrorDetail,
     ErrorResponse,
     GenerateRequest,
+    ImageModelItem,
+    ImageModelListOut,
     MessageOut,
 )
 from ..upstream_monitoring import UpstreamAttempt, record_upstream_attempts
+from ..upstream_routing import load_upstream_candidates
 
 limiter = get_limiter()
 
@@ -96,9 +106,9 @@ def _spawn_background_task(coro) -> asyncio.Task:
 #   3. 成功路径不需要再扣，预扣已经搞定
 
 
-def _calculate_cost(n: int) -> int:
-    """每张图 1 分，最少 1"""
-    return max(1, n)
+def _calculate_cost(model: str, n: int) -> int:
+    """按模型单价计费，最少按 1 张计算。"""
+    return calculate_image_model_cost(model, n)
 
 
 async def _charge_credits(
@@ -550,6 +560,35 @@ def _apply_multi_view_grid_prompt(
     return f"{prompt}\n\nMulti-view grid instruction: {instruction}"
 
 
+@router.get("/models", response_model=ImageModelListOut)
+async def list_image_models() -> ImageModelListOut:
+    """返回前台可选择的模型目录，不暴露上游渠道地址。"""
+    channels = await load_upstream_candidates()
+    items: list[ImageModelItem] = []
+    for definition in IMAGE_MODEL_DEFINITIONS:
+        matched = [
+            channel
+            for channel in channels
+            if image_model_matches_base_url(definition.id, channel.base_url)
+        ]
+        configured = len(matched) > 0
+        available = any(channel.enabled and channel.api_key for channel in matched)
+        items.append(
+            ImageModelItem(
+                id=definition.id,
+                label=definition.label,
+                description=definition.description,
+                cost_per_image=definition.cost_per_image,
+                available=available,
+                configured=configured,
+                supports_edit=definition.supports_edit,
+                supports_reasoning=definition.supports_reasoning,
+                accent=definition.accent,
+            )
+        )
+    return ImageModelListOut(items=items)
+
+
 async def _run_generate_task(
     ai_msg_id: int,
     conv_id: int,
@@ -558,12 +597,18 @@ async def _run_generate_task(
     action_label: str,
     user_id: int,
     cost: int,
+    unit_cost: int,
+    selected_model: str,
 ) -> None:
     """后台任务：调上游 generate，回写 message。失败时退款。"""
     factory = get_session_factory()
     attempts: list[UpstreamAttempt] = []
     try:
-        upstream_json = await call_images_generate(payload, attempts=attempts)
+        upstream_json = await call_images_generate(
+            payload,
+            attempts=attempts,
+            model_id=selected_model,
+        )
     except UpstreamTimeout as e:
         await _finalize_message(
             factory, ai_msg_id, conv_id, ok=False, text=customer_failure_text(e)
@@ -642,17 +687,20 @@ async def _run_generate_task(
         )
         return
 
-    # 部分缺图：按缺失张数退款（每张 1 分，与 _calculate_cost 对齐）
+    # 部分缺图：按缺失张数退款（使用当前模型单张费用）
     missing = max(0, requested - returned)
     if missing > 0:
+        refund_cost = missing * unit_cost
         await _refund_credits(
-            factory, user_id, ai_msg_id, missing,
+            factory, user_id, ai_msg_id, refund_cost,
             f"上游仅返回 {returned}/{requested} 张",
         )
+    else:
+        refund_cost = 0
 
     text = f"{action_label} {returned} 张 · {usage['total_tokens']} tokens"
     if missing > 0:
-        text += f"（请求 {requested} 张，已退 {missing} 积分）"
+        text += f"（请求 {requested} 张，已退 {refund_cost} 积分）"
     urls = await _persist_generated_assets_for_message(
         factory,
         urls,
@@ -663,7 +711,8 @@ async def _run_generate_task(
     )
 
     params = {
-        "model": upstream_json.get("model", payload.get("model")),
+        "model": selected_model,
+        "upstream_model": upstream_json.get("model", payload.get("model")),
         "usage": usage,
         # 把请求参数也存一份方便 UI 还原
         "request": request_params,
@@ -697,7 +746,19 @@ async def generate(
     """
     # 未验证邮箱用户不允许触发上游 API key 消耗
     require_verified_user(user)
-    upstream_model = "gpt-image-2"
+    try:
+        selected_model = normalize_image_model_id(req.model)
+        model_def = get_image_model(selected_model)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "validation_error", "message": str(e)}},
+        ) from e
+    if req.reasoning and not model_def.supports_reasoning:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "validation_error", "message": "当前模型不支持思考模式"}},
+        )
     prompt_with_view = _apply_view_angle_prompt(req.prompt, req.view_angle)
     prompt_with_layout = _apply_multi_view_grid_prompt(
         prompt_with_view,
@@ -706,7 +767,7 @@ async def generate(
     )
 
     payload: dict[str, Any] = {
-        "model": upstream_model,
+        "model": model_def.upstream_model,
         "prompt": prompt_with_layout,
         "size": req.size,
         "quality": req.quality,
@@ -715,11 +776,16 @@ async def generate(
         "output_format": req.output_format,
         "moderation": req.moderation,
     }
+    if model_def.provider_model:
+        payload["provider_model"] = model_def.provider_model
     if req.reasoning:
         payload["reasoning"] = True
     if req.output_format in {"jpeg", "webp"} and req.output_compression is not None:
         payload["output_compression"] = req.output_compression
     request_params = {k: v for k, v in payload.items() if k != "prompt"}
+    request_params["model"] = selected_model
+    request_params["model_label"] = model_def.label
+    request_params["cost_per_image"] = model_def.cost_per_image
     request_params["view_angle"] = req.view_angle
     request_params["multi_view_grid"] = req.multi_view_grid
 
@@ -727,7 +793,7 @@ async def generate(
     conv = await _load_owned_conv(db, user.id, conversation_id)
 
     # 预扣积分（与 pending msg 同事务）
-    cost = _calculate_cost(req.n)
+    cost = _calculate_cost(selected_model, req.n)
     current_credits = user.credits or 0
     if current_credits < cost:
         raise _insufficient_credits(current=current_credits, need=cost)
@@ -748,6 +814,8 @@ async def generate(
             msg.id, conv.id, payload, request_params,
             action_label="已生成",
             user_id=user.id, cost=cost,
+            unit_cost=model_def.cost_per_image,
+            selected_model=selected_model,
         )
     )
 
@@ -764,6 +832,7 @@ async def _run_edit_task(
     files: list[tuple[str, tuple[str, bytes, str]]],
     user_id: int,
     cost: int,
+    unit_cost: int,
     dropped_refs: int = 0,
     force_backup: bool = False,
 ) -> None:
@@ -850,17 +919,20 @@ async def _run_edit_task(
         )
         return
 
-    # 部分缺图：按缺失张数退款（每张 1 分）
+    # 部分缺图：按缺失张数退款（使用 image2 单张费用）
     missing = max(0, requested - returned)
     if missing > 0:
+        refund_cost = missing * unit_cost
         await _refund_credits(
-            factory, user_id, ai_msg_id, missing,
+            factory, user_id, ai_msg_id, refund_cost,
             f"上游仅返回 {returned}/{requested} 张",
         )
+    else:
+        refund_cost = 0
 
     text = f"已修改 {returned} 张 · {usage['total_tokens']} tokens"
     if missing > 0:
-        text += f"（请求 {requested} 张，已退 {missing} 积分）"
+        text += f"（请求 {requested} 张，已退 {refund_cost} 积分）"
     if dropped_refs > 0:
         text += f"（已忽略 {dropped_refs} 张副参考图，当前仅支持单图）"
     if force_backup:
@@ -876,7 +948,8 @@ async def _run_edit_task(
 
     params = {
         "mode": "edit",
-        "model": upstream_json.get("model", fields.get("model")),
+        "model": "image2",
+        "upstream_model": upstream_json.get("model", fields.get("model")),
         "usage": usage,
         "request": {k: v for k, v in fields.items() if k != "prompt"},
     }
@@ -915,7 +988,9 @@ async def edit(
     # verified 闸放最前，避免未验证用户上传 multipart 字节
     require_verified_user(user)
     api_size = size.replace("×", "x")
-    upstream_model = "gpt-image-2"
+    selected_model = "image2"
+    model_def = get_image_model(selected_model)
+    upstream_model = model_def.upstream_model
 
     if not image:
         raise HTTPException(
@@ -970,7 +1045,7 @@ async def edit(
     conv = await _load_owned_conv(db, user.id, conversation_id)
 
     # 预扣积分（与 pending msg 同事务）
-    cost = _calculate_cost(n)
+    cost = _calculate_cost(selected_model, n)
     current_credits = user.credits or 0
     if current_credits < cost:
         raise _insufficient_credits(current=current_credits, need=cost)
@@ -1003,6 +1078,7 @@ async def edit(
         "mode": "edit",
         "request": {k: v for k, v in fields.items() if k != "prompt"},
         "cost": cost,
+        "cost_per_image": model_def.cost_per_image,
     }
     msg = await _create_pending_ai_msg(db, conv.id, init_params)
     await db.flush()  # 拿 msg.id
@@ -1013,6 +1089,7 @@ async def edit(
     _spawn_background_task(
         _run_edit_task(
             msg.id, conv.id, fields, files, user_id=user.id, cost=cost,
+            unit_cost=model_def.cost_per_image,
             dropped_refs=dropped_refs,
             force_backup=multi,
         )

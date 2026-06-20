@@ -1,4 +1,4 @@
-// gpt-image-2 出图后端代理 client（前端调 /api，由 Vite proxy 或 nginx 转发到 FastAPI）
+// 图像生成后端代理 client（前端调 /api，由 Vite proxy 或 nginx 转发到 FastAPI）
 //
 // 任务化生图：后端立即返回 pending ai message，前端轮询 GET /api/conversations/{id} 等 status 变化
 // 旧的同步 generateImages/editImage 已经移除 —— 解决"刷新页面丢生图结果"的 bug
@@ -7,7 +7,7 @@ import type { MessageOut } from "./conversations";
 
 export type GenerateRequest = {
   prompt: string;
-  /** 模型名，目前支持 "gpt-image-2"、"banana-nano-pro" 等 */
+  /** 内部模型 ID，如 image2、gemini、cloudflare、huggingface、pollinations */
   model?: string;
   size: string;
   quality: string;
@@ -37,6 +37,80 @@ export type GenerateResponse = {
   usage: GenerateUsage;
   model: string;
 };
+
+export type ImageModelItem = {
+  id: string;
+  label: string;
+  description: string;
+  cost_per_image: number;
+  available: boolean;
+  configured: boolean;
+  supports_edit: boolean;
+  supports_reasoning: boolean;
+  accent: string;
+};
+
+export type ImageModelListOut = {
+  items: ImageModelItem[];
+};
+
+export const FALLBACK_IMAGE_MODELS: ImageModelItem[] = [
+  {
+    id: "image2",
+    label: "Image2",
+    description: "统一生图模型，支持文生图、参考图编辑、视角控制与多宫格输出。",
+    cost_per_image: 4,
+    available: true,
+    configured: true,
+    supports_edit: true,
+    supports_reasoning: true,
+    accent: "#D7FF00",
+  },
+  {
+    id: "gemini",
+    label: "Gemini Flash Image",
+    description: "轻量级生图模型，适合快速出图和低成本草稿。",
+    cost_per_image: 2,
+    available: false,
+    configured: false,
+    supports_edit: false,
+    supports_reasoning: false,
+    accent: "#7CE38B",
+  },
+  {
+    id: "cloudflare",
+    label: "FLUX Schnell",
+    description: "快速开源生图模型，适合概念图和批量草稿。",
+    cost_per_image: 1,
+    available: false,
+    configured: false,
+    supports_edit: false,
+    supports_reasoning: false,
+    accent: "#4CB1FF",
+  },
+  {
+    id: "huggingface",
+    label: "FLUX Dev",
+    description: "开源生图模型，适合稳定风格探索。",
+    cost_per_image: 1,
+    available: false,
+    configured: false,
+    supports_edit: false,
+    supports_reasoning: false,
+    accent: "#FFB86B",
+  },
+  {
+    id: "pollinations",
+    label: "FLUX Lite",
+    description: "轻量文生图模型，适合快速尝试和草图预览。",
+    cost_per_image: 1,
+    available: false,
+    configured: false,
+    supports_edit: false,
+    supports_reasoning: false,
+    accent: "#FF7E87",
+  },
+];
 
 export type ApiError = {
   code: string;
@@ -96,6 +170,15 @@ export class GenerateError extends Error {
   }
 }
 
+export async function fetchImageModels(): Promise<ImageModelItem[]> {
+  const res = await authFetch("/api/images/models");
+  if (!res.ok) {
+    throw new Error(`fetchImageModels failed: ${res.status}`);
+  }
+  const data = (await res.json()) as ImageModelListOut;
+  return data.items;
+}
+
 /** 把 UI 的全角 × 映射为 API 的 x */
 export function normalizeSize(size: string): string {
   return size.replace(/×/g, "x");
@@ -112,7 +195,7 @@ export async function generateImages(
 ): Promise<MessageOut> {
   const body: GenerateRequest = {
     ...req,
-    model: req.model ?? "gpt-image-2",
+    model: req.model ?? "image2",
     size: normalizeSize(req.size),
   };
 

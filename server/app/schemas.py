@@ -73,6 +73,22 @@ class GenerateResponse(BaseModel):
     model: str
 
 
+class ImageModelItem(BaseModel):
+    id: str
+    label: str
+    description: str
+    cost_per_image: int
+    available: bool
+    configured: bool
+    supports_edit: bool
+    supports_reasoning: bool
+    accent: str
+
+
+class ImageModelListOut(BaseModel):
+    items: list[ImageModelItem]
+
+
 class ErrorDetail(BaseModel):
     code: str
     message: str

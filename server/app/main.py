@@ -63,6 +63,7 @@ async def lifespan(app: FastAPI):
         from .models import UpstreamChannel as _UC
         from .upstream_channels import (
             should_repair_upstream_channel_name as _repair_upstream_name,
+            upstream_channel_supports_edit as _upstream_supports_edit,
             upstream_channel_display_name as _upstream_display_name,
         )
         from sqlalchemy import select as _sel
@@ -85,7 +86,7 @@ async def lifespan(app: FastAPI):
                     enabled=True,
                     is_default=_current_default is None,
                     priority=100,
-                    supports_edit=True,
+                    supports_edit=_upstream_supports_edit(_settings.openai_base_url),
                     max_concurrent=10,
                     timeout_seconds=int(_settings.openai_timeout),
                 ))
@@ -119,7 +120,9 @@ async def lifespan(app: FastAPI):
                         is_default=False,
                         auto_switch_enabled=True,
                         priority=50,
-                        supports_edit=True,
+                        supports_edit=_upstream_supports_edit(
+                            _settings.openai_base_url_backup
+                        ),
                         max_concurrent=10,
                         timeout_seconds=int(_settings.openai_timeout),
                     ))

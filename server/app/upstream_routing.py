@@ -10,6 +10,8 @@ from sqlalchemy import select
 from .config import get_settings
 from .crypto import decrypt_api_key, is_encryption_configured
 from .db import get_session_factory
+from .model_catalog import image_model_matches_base_url
+from .upstream_channels import upstream_channel_supports_edit
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,40 @@ def order_upstream_targets(
     return [normalized_default, *fallbacks]
 
 
+def order_upstream_model_targets(
+    channels: Iterable[ChannelCandidate],
+    model_id: str,
+    *,
+    require_edit: bool = False,
+) -> list[ChannelCandidate]:
+    """按用户选择的模型过滤候选，避免一次请求跨模型自动切换。"""
+    eligible = [
+        replace(channel, base_url=_normalize_base_url(channel.base_url))
+        for channel in channels
+        if channel.enabled
+        and channel.api_key
+        and _normalize_base_url(channel.base_url)
+        and image_model_matches_base_url(model_id, channel.base_url)
+        and (not require_edit or channel.supports_edit)
+    ]
+    if not eligible:
+        return []
+
+    default = next((channel for channel in eligible if channel.is_default), None)
+    if default is None:
+        default = sorted(eligible, key=_priority_key)[0]
+
+    default_key = _candidate_key(default)
+    normalized_default = replace(default, is_default=True)
+    fallbacks = [
+        replace(channel, is_default=False)
+        for channel in eligible
+        if _candidate_key(channel) != default_key and channel.auto_switch_enabled
+    ]
+    fallbacks.sort(key=_priority_key)
+    return [normalized_default, *fallbacks]
+
+
 def prefer_auto_switch_targets_first(
     targets: Iterable[ChannelCandidate],
 ) -> list[ChannelCandidate]:
@@ -103,7 +139,7 @@ def _env_candidates(settings) -> list[ChannelCandidate]:
                 api_key=settings.openai_api_key,
                 enabled=True,
                 priority=100,
-                supports_edit=True,
+                supports_edit=upstream_channel_supports_edit(settings.openai_base_url),
                 timeout_seconds=int(getattr(settings, "openai_timeout", 120)),
                 is_default=True,
                 auto_switch_enabled=False,
@@ -120,7 +156,9 @@ def _env_candidates(settings) -> list[ChannelCandidate]:
                 api_key=settings.openai_api_key_backup,
                 enabled=True,
                 priority=50,
-                supports_edit=True,
+                supports_edit=upstream_channel_supports_edit(
+                    settings.openai_base_url_backup
+                ),
                 timeout_seconds=int(getattr(settings, "openai_timeout", 120)),
                 is_default=False,
                 auto_switch_enabled=True,
@@ -161,7 +199,8 @@ async def load_upstream_targets(
                     api_key=decrypt(row.api_key),
                     enabled=row.enabled,
                     priority=row.priority,
-                    supports_edit=row.supports_edit,
+                    supports_edit=row.supports_edit
+                    and upstream_channel_supports_edit(row.base_url),
                     timeout_seconds=row.timeout_seconds,
                     is_default=bool(getattr(row, "is_default", False)),
                     auto_switch_enabled=bool(
@@ -183,5 +222,62 @@ async def load_upstream_targets(
     return order_upstream_targets(
         _env_candidates(settings),
         env_base_url=env_base_url,
+        require_edit=require_edit,
+    )
+
+
+async def load_upstream_candidates(*, settings=None) -> list[ChannelCandidate]:
+    """加载后台登记的所有渠道；数据库不可用时回退到 env 配置。"""
+    settings = settings or get_settings()
+    if getattr(settings, "database_url", ""):
+        try:
+            from .models import UpstreamChannel
+
+            factory = get_session_factory()
+            async with factory() as db:
+                rows = (
+                    await db.execute(
+                        select(UpstreamChannel).order_by(
+                            UpstreamChannel.priority.desc(),
+                            UpstreamChannel.id.asc(),
+                        )
+                    )
+                ).scalars().all()
+            decrypt = decrypt_api_key if is_encryption_configured() else (lambda value: value)
+            return [
+                ChannelCandidate(
+                    id=row.id,
+                    name=row.name,
+                    base_url=row.base_url,
+                    api_key=decrypt(row.api_key),
+                    enabled=row.enabled,
+                    priority=row.priority,
+                    supports_edit=row.supports_edit
+                    and upstream_channel_supports_edit(row.base_url),
+                    timeout_seconds=row.timeout_seconds,
+                    is_default=bool(getattr(row, "is_default", False)),
+                    auto_switch_enabled=bool(
+                        getattr(row, "auto_switch_enabled", False)
+                    ),
+                )
+                for row in rows
+            ]
+        except Exception:
+            logger.warning("加载数据库上游渠道失败，回退到环境变量配置", exc_info=True)
+
+    return _env_candidates(settings)
+
+
+async def load_upstream_model_targets(
+    model_id: str,
+    *,
+    require_edit: bool = False,
+    settings=None,
+) -> list[ChannelCandidate]:
+    """加载某个模型可用的渠道；不会跨模型返回 fallback。"""
+    candidates = await load_upstream_candidates(settings=settings)
+    return order_upstream_model_targets(
+        candidates,
+        model_id,
         require_edit=require_edit,
     )

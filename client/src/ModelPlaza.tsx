@@ -1,5 +1,13 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { FEATURED, RECOMMEND, TOTAL_PAGES, type FilterValue } from "./plaza/data";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  buildModelPageStats,
+  imageModelToFeatured,
+  imageModelToRecommend,
+  sortImageModelsForDisplay,
+  TOTAL_PAGES,
+  type FilterValue,
+} from "./plaza/data";
+import { FALLBACK_IMAGE_MODELS, fetchImageModels, type ImageModelItem } from "./api/gptImage";
 import { TopBar } from "./plaza/TopBar";
 import { HeroBanner } from "./plaza/HeroBanner";
 import { FilterBar } from "./plaza/FilterBar";
@@ -9,33 +17,81 @@ import { Paginator } from "./plaza/Paginator";
 import { PLAZA_GLASS_RADIUS } from "./plaza/constants";
 import type { GlassShape } from "./LiquidGlass";
 
-// 模型广场（内嵌组件）。
-// 作为 App 主壳中 activeNav==='models' 分区的内容，由父级提供布局外壳与全局背景。
-// Hero + 4 张 FeaturedCard 通过 onShapesChange 把 boundingClientRect 上报给 App，
-// App 把它们传给全局 LiquidGlass canvas 做 WebGL2 渲染（折射 / 色散 / 菲涅尔 / 投影）。
-// 其余区块（TopBar / FilterBar / RecommendCard / Paginator）用 CSS 玻璃仿色，不进 WebGL。
-
 type Props = {
   onShapesChange?: (shapes: GlassShape[]) => void;
 };
+
+function matchesFilter(chipLabel: string, filter: FilterValue) {
+  return filter === "全部" || chipLabel === filter;
+}
+
+function matchesSearch(item: { id: string; title: string; desc: string }, query: string) {
+  const keyword = query.trim().toLowerCase();
+  if (!keyword) return true;
+  return [item.id, item.title, item.desc].some((value) =>
+    value.toLowerCase().includes(keyword),
+  );
+}
 
 export default function ModelPlaza({ onShapesChange }: Props = {}) {
   const [activeFilter, setActiveFilter] = useState<FilterValue>("全部");
   const [page, setPage] = useState(1);
   const [searchQuery, setSearchQuery] = useState("");
+  const [models, setModels] = useState<ImageModelItem[]>(FALLBACK_IMAGE_MODELS);
 
-  // 用 useRef<T>(null) 形式（不带 | null）：返回 RefObject<T>，
-  // 与 FeaturedCard / HeroBanner 的 forwardRef ref 参数类型兼容。
   const heroRef = useRef<HTMLDivElement>(null);
-  // 4 个旗舰卡 ref —— FEATURED 数组固定 4 条
   const feat0Ref = useRef<HTMLButtonElement>(null);
   const feat1Ref = useRef<HTMLButtonElement>(null);
   const feat2Ref = useRef<HTMLButtonElement>(null);
   const feat3Ref = useRef<HTMLButtonElement>(null);
-  const featRefs = [feat0Ref, feat1Ref, feat2Ref, feat3Ref];
+  const featRefs = useMemo(() => [feat0Ref, feat1Ref, feat2Ref, feat3Ref], []);
 
-  // 测量 Hero + 4 旗舰卡的屏幕位置，上报给全局 LiquidGlass。
-  // 用 useLayoutEffect + ResizeObserver + scroll/resize 监听保证一致性。
+  const loadModels = useCallback(async () => {
+    const items = await fetchImageModels();
+    if (items.length > 0) setModels(items);
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    loadModels().catch(() => {
+      if (alive) setModels(FALLBACK_IMAGE_MODELS);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [loadModels]);
+
+  const displayModels = useMemo(() => sortImageModelsForDisplay(models), [models]);
+  const stats = useMemo(() => buildModelPageStats(displayModels), [displayModels]);
+
+  const featuredItems = useMemo(
+    () =>
+      displayModels
+        .slice(0, 4)
+        .map(imageModelToFeatured)
+        .filter(
+          (item) =>
+            matchesFilter(item.chip.label, activeFilter) && matchesSearch(item, searchQuery),
+        ),
+    [activeFilter, displayModels, searchQuery],
+  );
+
+  const recommendItems = useMemo(
+    () =>
+      displayModels
+        .slice(4)
+        .map(imageModelToRecommend)
+        .filter(
+          (item) =>
+            matchesFilter(item.chip.label, activeFilter) && matchesSearch(item, searchQuery),
+        ),
+    [activeFilter, displayModels, searchQuery],
+  );
+
+  useEffect(() => {
+    setPage(1);
+  }, [activeFilter, searchQuery]);
+
   useLayoutEffect(() => {
     if (!onShapesChange) return;
     const measure = () => {
@@ -65,7 +121,6 @@ export default function ModelPlaza({ onShapesChange }: Props = {}) {
     });
 
     const onScrollOrResize = () => requestAnimationFrame(measure);
-    // 滚动监听用 capture，因为滚动容器是 ModelPlaza 内部 overflow-y-auto 的 div
     window.addEventListener("scroll", onScrollOrResize, true);
     window.addEventListener("resize", onScrollOrResize);
 
@@ -75,10 +130,8 @@ export default function ModelPlaza({ onShapesChange }: Props = {}) {
       window.removeEventListener("scroll", onScrollOrResize, true);
       window.removeEventListener("resize", onScrollOrResize);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onShapesChange]);
+  }, [featRefs, featuredItems.length, onShapesChange]);
 
-  // 卸载时清空 shapes：切到其它 nav 后 LiquidGlass 不残留广场卡片轮廓
   useEffect(() => {
     return () => {
       onShapesChange?.([]);
@@ -88,20 +141,20 @@ export default function ModelPlaza({ onShapesChange }: Props = {}) {
   return (
     <div className="min-w-0 flex-1 space-y-5 overflow-y-auto px-1 pb-2">
       <TopBar searchQuery={searchQuery} onSearchChange={setSearchQuery} />
-      <HeroBanner ref={heroRef} />
+      <HeroBanner ref={heroRef} stats={stats} />
       <FilterBar activeFilter={activeFilter} onFilterChange={setActiveFilter} />
       <FeaturedGrid
-        items={FEATURED}
+        items={featuredItems}
         cardRefs={featRefs}
-        onCardClick={(c) => console.log("[plaza] featured selected", c.id)}
+        onCardClick={(card) => console.log("[plaza] model selected", card.id)}
       />
       <RecommendGrid
-        items={RECOMMEND}
-        onCardClick={(m) => console.log("[plaza] recommend selected", m.id)}
-        onFavorite={(m) => console.log("[plaza] favorite toggled", m.id)}
-        onRefresh={() => console.log("[plaza] refresh recommend")}
+        items={recommendItems}
+        onCardClick={(model) => console.log("[plaza] model selected", model.id)}
+        onFavorite={(model) => console.log("[plaza] favorite toggled", model.id)}
+        onRefresh={() => void loadModels()}
       />
-      <Paginator page={page} total={TOTAL_PAGES} onChange={setPage} />
+      {TOTAL_PAGES > 1 && <Paginator page={page} total={TOTAL_PAGES} onChange={setPage} />}
     </div>
   );
 }
