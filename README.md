@@ -8,7 +8,7 @@
 <h1 align="center">image2</h1>
 
 <p align="center">
-  <strong>AI 图像生成工作流 · 节点画布编辑器</strong>
+  <strong>AI 图像生成平台</strong>
 </p>
 
 <p align="center">
@@ -25,18 +25,11 @@
 
 ---
 
-**image2** 是一个基于 AI 的图像生成 SaaS 平台，采用**节点画布编辑器**的交互范式。用户通过搭建可视化工作流来驱动图像生成、编辑与后期处理，而非传统的表单填表模式。
-
-前端使用 React + WebGL2 实现**液态玻璃**（Liquid Glass）光学渲染节点界面，后端通过 FastAPI 代理 OpenAI 兼容的图像生成上游服务。
+**image2** 是一个基于 AI 的图像生成 SaaS 平台，前端使用 React + WebGL2 液态玻璃（Liquid Glass）界面，后端通过 FastAPI 代理 OpenAI 兼容的图像生成上游服务。
 
 ---
 
 ## ✨ 功能特性
-
-### 🎨 节点画布工作流
-- **可视化节点编辑**：拖拽连接图像生成、编辑、参考图等节点，构建复合工作流
-- **液态玻璃 UI**：基于 WebGL2 多通道着色器（高斯模糊 + 折射 + 色散 + 菲涅尔反射），实现真正的光学玻璃质感
-- **灰阶设计系统**：颜色全部让给语义（端口数据类型色），唯一电黄 `#F0FE2D` CTA
 
 ### 🤖 多模型图像生成
 - 支持 **gpt-image-2**、**Gemini**、**Cloudflare Workers AI**、**Pollinations.ai** 等多上游接入
@@ -46,7 +39,6 @@
 
 ### 🛠 工具链
 - **智能抠图**：支持 grabcut / rembg / SAM / MobileSAM 四种后端
-- **PSD 导出**：生成分层 PSD 文件以便后期编辑
 - **对话历史**：完整的生成记录与管理
 
 ### 🔐 用户系统
@@ -126,8 +118,7 @@ image2/
 │   │   ├── conversation/      # 对话历史
 │   │   ├── pages/             # 页面（Admin 等）
 │   │   ├── plaza/             # 模型广场
-│   │   ├── shaders/           # WebGL GLSL 着色器
-│   │   └── App.tsx            # 节点画布主逻辑
+│   │   └── App.tsx            # 主应用逻辑
 │   ├── index.html
 │   └── package.json
 │
@@ -153,17 +144,6 @@ image2/
 ## 📄 设计系统
 
 详见 [`DESIGN.md`](DESIGN.md) — 包含完整的色彩体系、排版规范、间距系统和交互模式。
-
-核心设计原则：
-- **灰阶 UI**：界面使用中性灰色调，颜色保留给语义
-- **液态玻璃**：节点使用真正的 WebGL 光学玻璃效果（折射背景），非 CSS backdrop-filter
-- **电黄 CTA**：唯一亮色动作按钮 `#F0FE2D`，引导用户操作
-
----
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request。
 
 ---
 
