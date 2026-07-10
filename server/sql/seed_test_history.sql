@@ -7,7 +7,8 @@
 --
 -- 用前修改下面 @uid 行的 email；执行 mysql -u <user> -p <db> < server/sql/seed_test_history.sql
 
-SET @uid := (SELECT id FROM users WHERE email = '2859098803@qq.com' LIMIT 1);
+-- ⚠️ 运行前将下方邮箱替换为数据库中存在的用户邮箱
+SET @uid := (SELECT id FROM users WHERE email = 'your-email@example.com' LIMIT 1);
 SELECT
   CASE WHEN @uid IS NULL THEN
     (SELECT 0 FROM users WHERE 1/0)  -- 触发除零异常，强行报错避免误插

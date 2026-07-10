@@ -75,7 +75,7 @@ class Settings:
         )
         self.asset_public_base_url: str = os.getenv("ASSET_PUBLIC_BASE_URL", "").strip().rstrip("/")
         # 历史出图源如果已经下线，不再返回给前端尝试加载，避免页面反复显示坏图。
-        raw_dead_hosts = os.getenv("BROKEN_IMAGE_HOSTS", "67.21.86.146:3015").strip()
+        raw_dead_hosts = os.getenv("BROKEN_IMAGE_HOSTS", "").strip()
         self.broken_image_hosts: tuple[str, ...] = tuple(
             h.strip().lower() for h in raw_dead_hosts.split(",") if h.strip()
         )
